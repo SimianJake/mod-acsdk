@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+// Account sessions (ARCHITECTURE.md §4.3). SDK logins are ordinary AzerothCore game accounts: Login checks the
+// account's SRP6 verifier and returns an opaque session token that every other call sends as
+// "authorization: Bearer <session_token>". A session acts only for characters on its own account.
+service AuthService {
+  // Reads "authorization: Basic base64(username:password)" from the call metadata (never from the message, so
+  // credentials stay out of request logs). An unknown account and a wrong password fail the same way, with
+  // UNAUTHENTICATED. A new Login ends the account's previous session.
+  rpc Login(AuthLoginRequest) returns (AuthLoginResponse);
+  // Ends the calling session; its leases are released and its event streams end.
+  rpc Logout(AuthLogoutRequest) returns (AuthLogoutResponse);
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+}
+
+message AuthLoginRequest {
+  string label = 1; // shown in logs and ListLeases; falls back to x-acsdk-controller-id, then the username
+}
+
+message AuthLoginResponse {
+  string session_token = 1;   // bearer token; keep it secret
+  uint32 account_id = 2;
+  string username = 3;        // as stored by AzerothCore (upper-case)
+  bool admin = 4;             // GM level >= ACSDK.Auth.AdminGmLevel
+  uint32 idle_timeout_s = 5;  // session ends after this long without a call
+  uint32 max_lifetime_s = 6;  // and in any case this long after Login
+}
+
+message AuthLogoutRequest {}
+
+message AuthLogoutResponse {
+  bool ok = 1;
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  uint32 account_id = 1;
+  string username = 2;
+  string label = 3;
+  bool admin = 4;
+  uint64 session_age_ms = 5;
+  uint32 expires_in_ms = 6;   // the earlier of the idle and absolute limits, counted from this call
+}

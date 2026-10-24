@@ -2,8 +2,9 @@
 #   .\scripts\run_realm.ps1                     # RelWithDebInfo build
 #   .\scripts\run_realm.ps1 -Config Debug
 #   .\scripts\run_realm.ps1 -DataDir D:\wow-data  # folder holding dbc/ maps/ vmaps/ mmaps/
-# On first run it creates worldserver.conf / authserver.conf / mod_acsdk.conf from the .dist files
-# and generates a random ACSDK.AuthToken (printed once; read it back from configs\modules\mod_acsdk.conf).
+# On first run it creates worldserver.conf / authserver.conf / mod_acsdk.conf from the .dist files.
+# SDK clients log in with AzerothCore accounts: create one in the worldserver console with
+# ".account create <name> <password>" (the name must start with ACSDK.HeadlessAccountPrefix).
 param(
     [ValidateSet("RelWithDebInfo", "Debug", "Release")] [string] $Config = "RelWithDebInfo",
     [string] $DataDir = "",
@@ -67,13 +68,7 @@ Initialize-Config (Join-Path $configs "worldserver.conf.dist") (Join-Path $confi
 Initialize-Config (Join-Path $configs "authserver.conf.dist") (Join-Path $configs "authserver.conf") @{}
 
 $modConf = Join-Path $configs "modules\mod_acsdk.conf"
-if (-not (Test-Path $modConf)) {
-    $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $token = -join ($bytes | ForEach-Object { $_.ToString("x2") })
-    Initialize-Config (Join-Path $configs "modules\mod_acsdk.conf.dist") $modConf @{ "ACSDK.AuthToken" = "`"$token`"" }
-    Write-Host "Generated ACSDK.AuthToken in $modConf"
-}
+Initialize-Config (Join-Path $configs "modules\mod_acsdk.conf.dist") $modConf @{}
 
 # --- Servers ---
 if ($SetupOnly) { return }

@@ -19,6 +19,14 @@ namespace acsdk
         if (!_filter.characters.empty() && !_filter.characters.contains(event.character_guid()))
             return false;
 
+        // Owner-only (ARCHITECTURE.md §4.3), also for an explicit list: a character can change accounts.
+        if (_filter.accountId != 0)
+        {
+            OwnerOf ownerOf = s_ownerOf.load(std::memory_order_relaxed);
+            if (!ownerOf || ownerOf(event.character_guid()) != _filter.accountId)
+                return false;
+        }
+
         if (type == v1::RAW_PACKET)
             return _filter.rawOpcodes.contains(static_cast<uint16_t>(event.raw_packet().opcode()));
 
@@ -62,6 +70,22 @@ namespace acsdk
         EventPtr next = std::move(_queue.front());
         _queue.pop_front();
         return next;
+    }
+
+    bool EventSubscriber::Close()
+    {
+        std::lock_guard lock(_mutex);
+        _closed = true;
+        if (_writing)
+            return false;
+        _writing = true;
+        return true;
+    }
+
+    bool EventSubscriber::Closed() const
+    {
+        std::lock_guard lock(_mutex);
+        return _closed;
     }
 
     // ---------------------------------------------------------------- EventBus
@@ -205,6 +229,14 @@ namespace acsdk
             }
 
         _subscriberCount.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    void EventBus::EndSession(uint64_t sessionId)
+    {
+        std::lock_guard lock(_subscribersMutex);
+        for (Entry& e : _subscribers)
+            if (e.subscriber->GetFilter().sessionId == sessionId && e.subscriber->Close())
+                e.waker(); // under the lock, as in Dispatch
     }
 
     std::size_t EventBus::SubscriberCount() const

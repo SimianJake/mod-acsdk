@@ -64,8 +64,9 @@ target_link_libraries(modules
   PUBLIC
     acsdk-proto)
 
-# Golden-byte tests for the packet builders/decoders (game-free code; links only AC's `shared`).
-# Off by default; -DACSDK_BUILD_TESTS=ON builds <build>/bin/<Config>/acsdk-packet-tests.
+# Golden-byte tests for the packet builders/decoders, and unit tests for account sessions and leases
+# (game-free code; links only AC's `shared`). Off by default; -DACSDK_BUILD_TESTS=ON builds
+# <build>/bin/<Config>/acsdk-packet-tests and acsdk-session-tests.
 option(ACSDK_BUILD_TESTS "Build the mod-acsdk packet tests" OFF)
 if(ACSDK_BUILD_TESTS)
 add_executable(acsdk-packet-tests
@@ -84,6 +85,27 @@ target_link_libraries(acsdk-packet-tests
     shared)
 
 set_target_properties(acsdk-packet-tests
+  PROPERTIES
+    FOLDER "modules"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(acsdk-session-tests
+  "${CMAKE_CURRENT_LIST_DIR}/tests/cpp/SessionTests.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/src/auth/SessionManager.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/src/auth/LoginThrottle.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/src/leases/LeaseManager.cpp")
+
+target_include_directories(acsdk-session-tests
+  PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/src/auth"
+    "${CMAKE_CURRENT_LIST_DIR}/src/leases")
+
+target_link_libraries(acsdk-session-tests
+  PRIVATE
+    acore-core-interface
+    shared)
+
+set_target_properties(acsdk-session-tests
   PROPERTIES
     FOLDER "modules"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

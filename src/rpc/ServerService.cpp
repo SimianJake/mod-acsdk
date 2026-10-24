@@ -8,17 +8,18 @@ namespace acsdk
     namespace
     {
         constexpr uint32_t ApiVersion = 1;
-        constexpr char const* SdkVersion = "1.0.0";
+        constexpr uint32_t ApiMinor = 1;        // 1.1: account sessions (AuthService)
+        constexpr char const* SdkVersion = "1.1.0";
 
-        // Answers entirely from atomics/immutable data, so it never touches the world thread.
+        // Answers entirely from atomics/immutable data, so it never touches the world thread. Health and GetInfo
+        // need no session (clients check reachability and version before logging in); GetStats is admin-only.
         class ServerServiceImpl final : public v1::ServerService::CallbackService
         {
         public:
             grpc::ServerUnaryReactor* Health(grpc::CallbackServerContext* ctx, v1::HealthRequest const* /*request*/, v1::HealthResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
-                    return reactor;
+                CountCall();
 
                 response->set_serving(true);
                 reactor->Finish(grpc::Status::OK);
@@ -28,8 +29,7 @@ namespace acsdk
             grpc::ServerUnaryReactor* GetInfo(grpc::CallbackServerContext* ctx, v1::GetInfoRequest const* /*request*/, v1::GetInfoResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
-                    return reactor;
+                CountCall();
 
                 ServerInfo const& info = sAcsdk.Info();
                 auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - info.startedAt);
@@ -40,6 +40,8 @@ namespace acsdk
                 response->set_uptime_ms(static_cast<uint64_t>(uptime.count()));
                 response->set_world_ticks(info.worldTicks.load(std::memory_order_relaxed));
                 response->set_last_tick_diff_ms(info.lastTickDiffMs.load(std::memory_order_relaxed));
+                response->set_api_minor(ApiMinor);
+                response->add_auth_modes("basic");
                 reactor->Finish(grpc::Status::OK);
                 return reactor;
             }
@@ -47,7 +49,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* GetStats(grpc::CallbackServerContext* ctx, v1::GetStatsRequest const* /*request*/, v1::GetStatsResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!AuthorizeAdmin(ctx, reactor, caller))
                     return reactor;
 
                 Stats const& s = sAcsdk.GetStats();

@@ -15,7 +15,9 @@ namespace acsdk
     // so it can be unit tested. World thread only.
     //
     // Tokens are bearer capabilities: >=128 bits from a CSPRNG, compared in constant time, never logged and
-    // never returned to anyone but the claimant.
+    // never returned to anyone but the claimant. Each lease is bound to the account session that claimed it
+    // (ARCHITECTURE.md §4.3): its token is valid only together with that session, and ending the session ends
+    // its leases (EndSession).
     class LeaseManager
     {
     public:
@@ -42,17 +44,18 @@ namespace acsdk
             uint64_t characterGuid = 0;
             std::string holderLabel;
             Clock::time_point expiresAt;
+            uint64_t sessionId = 0;
         };
 
         LeaseManager(TokenGenerator generator, std::chrono::seconds ttl, bool allowForceTakeover)
             : _generate(std::move(generator)), _ttl(ttl), _allowForceTakeover(allowForceTakeover) { }
 
-        Result Claim(uint64_t guid, std::string const& holderLabel, bool force, Clock::time_point now, Grant& out);
-        Result Release(uint64_t guid, std::string const& token, Clock::time_point now);
-        Result Renew(uint64_t guid, std::string const& token, Clock::time_point now, Clock::time_point& expiresAt);
+        Result Claim(uint64_t guid, uint64_t sessionId, std::string const& holderLabel, bool force, Clock::time_point now, Grant& out);
+        Result Release(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now);
+        Result Renew(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now, Clock::time_point& expiresAt);
 
-        // True only for the current, unexpired token of `guid`.
-        bool Validate(uint64_t guid, std::string const& token, Clock::time_point now) const;
+        // True only for the current, unexpired token of `guid`, presented by the session that claimed it.
+        bool Validate(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now) const;
         bool IsLeased(uint64_t guid, Clock::time_point now) const;
         std::optional<LeaseInfo> Get(uint64_t guid, Clock::time_point now) const;
         std::vector<LeaseInfo> List(Clock::time_point now) const;
@@ -61,6 +64,8 @@ namespace acsdk
         std::vector<uint64_t> Expire(Clock::time_point now);
         // Drop a lease without a token (character logged out / removed).
         void Forget(uint64_t guid);
+        // Drops every lease held by `sessionId` (the session ended); returns the affected characters.
+        std::vector<uint64_t> EndSession(uint64_t sessionId);
 
         std::chrono::seconds Ttl() const { return _ttl; }
 
@@ -72,6 +77,7 @@ namespace acsdk
             std::string token;
             std::string holderLabel;
             Clock::time_point expiresAt;
+            uint64_t sessionId = 0;
         };
 
         TokenGenerator _generate;

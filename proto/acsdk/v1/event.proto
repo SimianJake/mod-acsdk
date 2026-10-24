@@ -22,6 +22,7 @@ import "acsdk/v1/character.proto";
 //   LeaseLost, CharacterStateChanged, CommandResult, Lagged ... SDK-internal
 //   RawPacket ........ opt-in SMSG copy (ACSDK.RawPackets.Enable)
 service EventService {
+  // Ends with UNAUTHENTICATED when the session ends; PERMISSION_DENIED if a listed character is another account's.
   rpc Subscribe(SubscribeRequest) returns (stream Event);
   // Answer a Prompt event (requires the character's lease token).
   rpc RespondToPrompt(RespondToPromptRequest) returns (PromptResponse);
@@ -48,7 +49,7 @@ enum EventType {
 }
 
 message SubscribeRequest {
-  repeated uint64 character_guids = 1;   // empty = every headless character
+  repeated uint64 character_guids = 1;   // empty = every character of the session's account; all must be its own
   repeated EventType types = 2;          // empty = every type except RAW_PACKET
   repeated uint32 raw_opcodes = 3;       // RAW_PACKET only: server opcodes to copy (needs ACSDK.RawPackets.Enable)
 }

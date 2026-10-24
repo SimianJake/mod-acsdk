@@ -1,7 +1,10 @@
 #
 # mod-acsdk configuration (PLAN.md §8)
 #
-# Copy to mod_acsdk.conf next to worldserver.conf (configs/modules/) and set ACSDK.AuthToken.
+# Copy to mod_acsdk.conf next to worldserver.conf (configs/modules/).
+#
+# SDK clients log in with ordinary AzerothCore game accounts (create one with the GM/console command
+# ".account create <name> <password>"). A session may only see and drive characters on its own account.
 #
 
 [worldserver]
@@ -16,7 +19,8 @@ ACSDK.Enable = 1
 
 #
 #    ACSDK.BindAddress / ACSDK.Port
-#        Description: Listen address for the gRPC server. Keep it on localhost.
+#        Description: Listen address for the gRPC server. The transport has no TLS yet, so the listener
+#                     refuses to start on anything but a loopback address (127.x.x.x, ::1, localhost).
 #        Default:     "127.0.0.1" / 50051
 #
 
@@ -24,13 +28,51 @@ ACSDK.BindAddress = "127.0.0.1"
 ACSDK.Port = 50051
 
 #
-#    ACSDK.AuthToken
-#        Description: Shared secret controllers send as "authorization: Bearer <token>".
-#                     The gRPC listener refuses to start while this is empty.
-#        Default:     ""
+#    ACSDK.Auth.AllowGmAccounts
+#        Description: Let accounts with a GM level (account_access.gmlevel > 0) log in to the SDK.
+#                     Off by default: SDK sessions are for player accounts. An admin session (below)
+#                     needs this on. GM accounts still cannot log characters in headless.
+#        Default:     0
 #
 
-ACSDK.AuthToken = ""
+ACSDK.Auth.AllowGmAccounts = 0
+
+#
+#    ACSDK.Auth.AdminGmLevel
+#        Description: Sessions of accounts at or above this GM level are admin: they may call
+#                     ServerService.GetStats and DebugService and use the ".acsdk session" commands'
+#                     RPC equivalents. Admin never grants access to other accounts' characters.
+#                     Only takes effect with ACSDK.Auth.AllowGmAccounts = 1.
+#        Default:     3
+#
+
+ACSDK.Auth.AdminGmLevel = 3
+
+#
+#    ACSDK.Auth.SessionIdleSec / ACSDK.Auth.SessionMaxSec
+#        Description: A session ends after SessionIdleSec without a call (sliding), and in any case
+#                     SessionMaxSec after login. Its leases are then released (LeaseLost SESSION_ENDED)
+#                     and its event streams end; its characters stay logged in.
+#        Default:     1800 / 86400
+#
+
+ACSDK.Auth.SessionIdleSec = 1800
+ACSDK.Auth.SessionMaxSec = 86400
+
+#
+#    ACSDK.Auth.RecheckSec
+#        Description: How often live sessions are checked against the auth database. A session ends
+#                     when its account is deleted, banned, locked, changes password or GM level, or no
+#                     longer matches ACSDK.HeadlessAccountPrefix.
+#        Default:     60
+#
+
+ACSDK.Auth.RecheckSec = 60
+
+#
+#    ACSDK.AuthToken
+#        Description: Removed in 1.1.0 (shared server token). Ignored, with a warning at startup.
+#
 
 #
 #    ACSDK.MaxCommandsPerTick / ACSDK.MaxTickBudgetMs
@@ -53,8 +95,9 @@ ACSDK.CommandQueueSize = 4096
 
 #
 #    ACSDK.HeadlessAccountPrefix
-#        Description: Only characters on accounts whose username starts with this prefix
-#                     (case-insensitive) may be listed or driven headless. Empty = none.
+#        Description: Extra server-wide gate: only accounts whose username starts with this prefix
+#                     (case-insensitive) may log in to the SDK or have characters driven headless.
+#                     Empty = any account. (Before 1.1.0, empty meant none.)
 #        Default:     "acsdkhc"
 #
 
@@ -95,8 +138,8 @@ ACSDK.PacketSinkSize = 256
 
 #
 #    ACSDK.Debug.Enable
-#        Description: Serve the dev-only DebugService (creates test accounts and characters).
-#                     Development only.
+#        Description: Serve the dev-only DebugService (creates test accounts and characters) to admin
+#                     sessions. Development only.
 #        Default:     0
 #
 

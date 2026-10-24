@@ -15,7 +15,12 @@ namespace acsdk
         c.enable = sConfigMgr->GetOption<bool>("ACSDK.Enable", true);
         c.bindAddress = sConfigMgr->GetOption<std::string>("ACSDK.BindAddress", "127.0.0.1");
         c.port = static_cast<uint16_t>(sConfigMgr->GetOption<uint32>("ACSDK.Port", 50051));
-        c.authToken = sConfigMgr->GetOption<std::string>("ACSDK.AuthToken", "", false);
+        c.authAllowGmAccounts = sConfigMgr->GetOption<bool>("ACSDK.Auth.AllowGmAccounts", false);
+        c.authAdminGmLevel = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("ACSDK.Auth.AdminGmLevel", 3));
+        c.authSessionIdleSec = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("ACSDK.Auth.SessionIdleSec", 1800));
+        c.authSessionMaxSec = std::max<uint32>(c.authSessionIdleSec, sConfigMgr->GetOption<uint32>("ACSDK.Auth.SessionMaxSec", 86400));
+        c.authRecheckSec = std::max<uint32>(5, sConfigMgr->GetOption<uint32>("ACSDK.Auth.RecheckSec", 60));
+        c.legacyAuthTokenSet = !sConfigMgr->GetOption<std::string>("ACSDK.AuthToken", "", false).empty();
         c.maxCommandsPerTick = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("ACSDK.MaxCommandsPerTick", 200));
         c.maxTickBudgetMs = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("ACSDK.MaxTickBudgetMs", 5));
         c.commandQueueSize = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("ACSDK.CommandQueueSize", 4096));

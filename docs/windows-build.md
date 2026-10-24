@@ -111,8 +111,9 @@ worldserver populates them on first start (`Updates.EnableDatabases`).
 ```
 
 Starts MySQL if needed, copies `libmysql.dll` next to the binaries, creates `worldserver.conf`,
-`authserver.conf` and `modules\mod_acsdk.conf` from their `.dist` files on first run (generating a
-random `ACSDK.AuthToken`), and launches authserver and worldserver.
+`authserver.conf` and `modules\mod_acsdk.conf` from their `.dist` files on first run, and launches
+authserver and worldserver. SDK clients log in with AzerothCore accounts; create one in the worldserver console
+with `account create <name> <password>` (the name must start with `ACSDK.HeadlessAccountPrefix`).
 
 **worldserver exits at startup without client data**. We use AzerothCore's prebuilt client-data (`https://github.com/wowgaming/client-data/releases/download/v20.0/data.zip`, the version `apps/installer` pins) unzipped into `C:\acsdk-build\data`; alternatively extract from a 3.3.5a client. Without it, worldserver stops ("Failed to find map files for starting
 areas", `World.cpp:334`), so maps/vmaps/mmaps must be extracted first (PLAN.md Phase 0 step 3;

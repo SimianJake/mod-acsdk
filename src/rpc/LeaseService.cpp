@@ -33,14 +33,21 @@ namespace acsdk
             grpc::ServerUnaryReactor* ClaimCharacter(grpc::CallbackServerContext* ctx, v1::ClaimCharacterRequest const* request, v1::ClaimCharacterResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 ObjectGuid guid = PlayerGuidFromApi(request->character_guid());
                 bool force = request->force();
-                std::string label = ControllerLabel(ctx);
-                PostToWorld(reactor, [guid, force, label, response](WorldCallPtr call)
+                std::string label = caller.label;
+                PostToWorld(reactor, [caller, guid, force, label, response](WorldCallPtr call)
                 {
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
                     HeadlessCharacter* c = sAcsdk.Runtime().Find(guid);
                     if (!c || (c->state != Lifecycle::Online && c->state != Lifecycle::LoggingIn))
                     {
@@ -57,7 +64,7 @@ namespace acsdk
                     }
 
                     LeaseManager::Grant grant;
-                    LeaseManager::Result r = sAcsdk.Leases().Claim(guid.GetCounter(), label, force, LeaseManager::Clock::now(), grant);
+                    LeaseManager::Result r = sAcsdk.Leases().Claim(guid.GetCounter(), caller.sessionId, label, force, LeaseManager::Clock::now(), grant);
                     response->set_ok(r == LeaseManager::Result::Ok);
                     response->set_reason(ReasonOf(r));
                     if (r == LeaseManager::Result::Ok)
@@ -79,14 +86,21 @@ namespace acsdk
             grpc::ServerUnaryReactor* ReleaseCharacter(grpc::CallbackServerContext* ctx, v1::ReleaseCharacterRequest const* request, v1::LeaseResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 ObjectGuid guid = PlayerGuidFromApi(request->character_guid());
                 std::string token = request->lease_token();
-                PostToWorld(reactor, [guid, token, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, token, response](WorldCallPtr call)
                 {
-                    LeaseManager::Result r = sAcsdk.Leases().Release(guid.GetCounter(), token, LeaseManager::Clock::now());
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
+                    LeaseManager::Result r = sAcsdk.Leases().Release(guid.GetCounter(), caller.sessionId, token, LeaseManager::Clock::now());
                     response->set_ok(r == LeaseManager::Result::Ok);
                     response->set_reason(ReasonOf(r));
                     if (r == LeaseManager::Result::Ok)
@@ -99,15 +113,22 @@ namespace acsdk
             grpc::ServerUnaryReactor* RenewLease(grpc::CallbackServerContext* ctx, v1::RenewLeaseRequest const* request, v1::RenewLeaseResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 ObjectGuid guid = PlayerGuidFromApi(request->character_guid());
                 std::string token = request->lease_token();
-                PostToWorld(reactor, [guid, token, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, token, response](WorldCallPtr call)
                 {
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
                     LeaseManager::Clock::time_point expiresAt;
-                    LeaseManager::Result r = sAcsdk.Leases().Renew(guid.GetCounter(), token, LeaseManager::Clock::now(), expiresAt);
+                    LeaseManager::Result r = sAcsdk.Leases().Renew(guid.GetCounter(), caller.sessionId, token, LeaseManager::Clock::now(), expiresAt);
                     response->set_ok(r == LeaseManager::Result::Ok);
                     response->set_reason(ReasonOf(r));
                     if (r == LeaseManager::Result::Ok)
@@ -120,13 +141,17 @@ namespace acsdk
             grpc::ServerUnaryReactor* ListLeases(grpc::CallbackServerContext* ctx, v1::ListLeasesRequest const* /*request*/, v1::ListLeasesResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
-                PostToWorld(reactor, [response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, response](WorldCallPtr call)
                 {
+                    // Leases on the caller's own characters only.
                     for (LeaseManager::LeaseInfo const& info : sAcsdk.Leases().List(LeaseManager::Clock::now()))
                     {
+                        if (!sAcsdk.Owns(caller.accountId, PlayerGuidFromApi(info.characterGuid)))
+                            continue;
                         v1::LeaseEntry* e = response->add_leases();
                         e->set_character_guid(info.characterGuid);
                         e->set_holder_label(info.holderLabel);

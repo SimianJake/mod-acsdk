@@ -97,15 +97,22 @@ namespace acsdk
             return std::chrono::milliseconds(std::min<uint32>(ms, 10 * 60 * 1000)); // server-side cap: 10 min
         }
 
-        // Common path for every command RPC: lease check and submission on the world thread; answer with the
-        // terminal result (wait) or right away with STARTED + command id.
-        void SubmitCommand(grpc::ServerUnaryReactor* reactor, v1::CharacterRef const& ref, bool wait, CommandSpec spec, v1::CommandResult* response)
+        // Common path for every command RPC: ownership and lease checks and submission on the world thread; answer
+        // with the terminal result (wait) or right away with STARTED + command id. The lease must have been claimed
+        // by the caller's own session (ARCHITECTURE.md §4.3).
+        void SubmitCommand(grpc::ServerUnaryReactor* reactor, Caller const& caller, v1::CharacterRef const& ref, bool wait, CommandSpec spec, v1::CommandResult* response)
         {
             ObjectGuid guid = PlayerGuidFromApi(ref.character_guid());
             std::string token = ref.lease_token();
-            PostToWorld(reactor, [guid, token, wait, spec = std::move(spec), response](WorldCallPtr call)
+            PostToWorld(reactor, [caller, guid, token, wait, spec = std::move(spec), response](WorldCallPtr call)
             {
-                if (!sAcsdk.CheckLease(guid, token))
+                if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                {
+                    call->Finish(owner);
+                    return;
+                }
+
+                if (!sAcsdk.CheckLease(guid, caller.sessionId, token))
                 {
                     response->set_status(v1::FAILED);
                     response->set_reason("INVALID_LEASE_TOKEN");
@@ -135,9 +142,9 @@ namespace acsdk
         }
 
         template <typename Request>
-        bool Begin(grpc::CallbackServerContext* ctx, grpc::ServerUnaryReactor* reactor, Request const* request)
+        bool Begin(grpc::CallbackServerContext* ctx, grpc::ServerUnaryReactor* reactor, Request const* request, Caller& caller)
         {
-            if (!Authorize(ctx, reactor))
+            if (!Authorize(ctx, reactor, caller))
                 return false;
             if (!request->has_character())
             {
@@ -184,7 +191,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* SendClientPacket(grpc::CallbackServerContext* ctx, v1::SendClientPacketRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
 
                 Config const& config = sAcsdk.GetConfig();
@@ -209,9 +217,15 @@ namespace acsdk
                 std::string token = request->character().lease_token();
                 std::string payload = request->payload();
                 uint32 perSecond = config.rawPacketsPerSecond;
-                PostToWorld(reactor, [guid, token, op, payload, perSecond, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, token, op, payload, perSecond, response](WorldCallPtr call)
                 {
-                    if (!sAcsdk.CheckLease(guid, token))
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
+                    if (!sAcsdk.CheckLease(guid, caller.sessionId, token))
                     {
                         response->set_status(v1::FAILED);
                         response->set_reason("INVALID_LEASE_TOKEN");
@@ -239,7 +253,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* MoveTo(grpc::CallbackServerContext* ctx, v1::MoveToRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::MoveTo;
@@ -248,25 +263,27 @@ namespace acsdk
                 spec.z = request->target().z();
                 spec.tolerance = request->tolerance() > 0 ? request->tolerance() : 1.0f;
                 spec.timeout = TimeoutOr(request->timeout_ms(), 30000);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Stop(grpc::CallbackServerContext* ctx, v1::StopRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Stop;
-                SubmitCommand(reactor, request->character(), true, spec, response);
+                SubmitCommand(reactor, caller, request->character(), true, spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Follow(grpc::CallbackServerContext* ctx, v1::FollowRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Follow;
@@ -274,14 +291,15 @@ namespace acsdk
                 spec.distance = request->distance() > 0 ? request->distance() : 2.0f;
                 spec.angle = request->angle();
                 spec.timeout = std::chrono::hours(24); // never completes on its own
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Face(grpc::CallbackServerContext* ctx, v1::FaceRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Face;
@@ -290,51 +308,55 @@ namespace acsdk
                 else
                     spec.orientation = request->orientation();
                 spec.timeout = std::chrono::seconds(3);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* SetTarget(grpc::CallbackServerContext* ctx, v1::SetTargetRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::SetTarget;
                 spec.targetGuid = request->target_guid();
-                SubmitCommand(reactor, request->character(), true, spec, response);
+                SubmitCommand(reactor, caller, request->character(), true, spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Attack(grpc::CallbackServerContext* ctx, v1::AttackRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Attack;
                 spec.targetGuid = request->target_guid();
                 spec.untilStopped = request->until_stopped();
                 spec.timeout = TimeoutOr(request->timeout_ms(), 120000);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* StopAttack(grpc::CallbackServerContext* ctx, v1::StopAttackRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::StopAttack;
-                SubmitCommand(reactor, request->character(), true, spec, response);
+                SubmitCommand(reactor, caller, request->character(), true, spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* CastSpell(grpc::CallbackServerContext* ctx, v1::CastSpellRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::CastSpell;
@@ -348,46 +370,49 @@ namespace acsdk
                     spec.destZ = request->destination().z();
                 }
                 spec.timeout = TimeoutOr(request->timeout_ms(), 30000);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* CancelCast(grpc::CallbackServerContext* ctx, v1::CancelCastRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::CancelCast;
                 spec.spellId = request->spell_id();
-                SubmitCommand(reactor, request->character(), true, spec, response);
+                SubmitCommand(reactor, caller, request->character(), true, spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Say(grpc::CallbackServerContext* ctx, v1::SayRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Say;
                 spec.text = request->text();
                 spec.timeout = std::chrono::seconds(5);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* Whisper(grpc::CallbackServerContext* ctx, v1::WhisperRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = CommandType::Whisper;
                 spec.text = request->text();
                 spec.whisperTo = request->to();
                 spec.timeout = std::chrono::seconds(5);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
@@ -397,13 +422,14 @@ namespace acsdk
                                                CommandType type, std::function<void(CommandSpec&)> fill)
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 CommandSpec spec;
                 spec.type = type;
                 spec.timeout = TimeoutOr(request->timeout_ms(), 5000);
                 fill(spec);
-                SubmitCommand(reactor, request->character(), request->wait(), spec, response);
+                SubmitCommand(reactor, caller, request->character(), request->wait(), spec, response);
                 return reactor;
             }
 
@@ -496,15 +522,22 @@ namespace acsdk
             grpc::ServerUnaryReactor* Cancel(grpc::CallbackServerContext* ctx, v1::CancelRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Begin(ctx, reactor, request))
+                Caller caller;
+                if (!Begin(ctx, reactor, request, caller))
                     return reactor;
                 ObjectGuid guid = PlayerGuidFromApi(request->character().character_guid());
                 std::string token = request->character().lease_token();
                 uint64_t commandId = request->command_id();
-                PostToWorld(reactor, [guid, token, commandId, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, token, commandId, response](WorldCallPtr call)
                 {
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
                     response->set_command_id(commandId);
-                    if (!sAcsdk.CheckLease(guid, token))
+                    if (!sAcsdk.CheckLease(guid, caller.sessionId, token))
                     {
                         response->set_status(v1::FAILED);
                         response->set_reason("INVALID_LEASE_TOKEN");
@@ -524,14 +557,24 @@ namespace acsdk
             grpc::ServerUnaryReactor* WaitCommand(grpc::CallbackServerContext* ctx, v1::WaitCommandRequest const* request, v1::CommandResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
                 uint64_t commandId = request->command_id();
                 auto waitFor = TimeoutOr(request->timeout_ms(), 30000);
-                PostToWorld(reactor, [commandId, waitFor, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, commandId, waitFor, response](WorldCallPtr call)
                 {
+                    // Commands of other accounts' characters look like unknown ids.
+                    ObjectGuid character = sAcsdk.Commands().CharacterOf(commandId);
+                    grpc::Status owner = character ? CheckOwner(caller, character) : grpc::Status::OK;
+                    if (owner.error_code() == grpc::StatusCode::UNAUTHENTICATED)
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
                     auto answered = std::make_shared<bool>(false);
-                    bool known = sAcsdk.Commands().Wait(commandId, [call, response, answered](CommandResult const& r)
+                    bool known = character && owner.ok() && sAcsdk.Commands().Wait(commandId, [call, response, answered](CommandResult const& r)
                     {
                         if (*answered)
                             return;

@@ -94,7 +94,7 @@ flowchart TB
         HK["Script hooks<br/>OnPacketSent, OnUnitDeath,<br/>OnAuraApply, ..."]
     end
 
-    A & B & O <-->|"HTTP/2 + protobuf<br/>Bearer server token<br/>lease token per command"| G
+    A & B & O <-->|"HTTP/2 + protobuf<br/>Bearer session token (account login)<br/>lease token per command"| G
     G -->|"PostToWorld(task)"| Q
     Q -->|"Drain (budgeted)"| World
     RT -->|"inject CMSG_* packets"| AC
@@ -106,8 +106,8 @@ flowchart TB
 
 The same thing in words:
 
-1. A controller calls an RPC. A gRPC thread checks the server token and **posts a task** to the world thread. It
-   never touches a game object.
+1. A controller calls an RPC. A gRPC thread resolves its account session and **posts a task** to the world thread,
+   which checks the character belongs to that account. The gRPC thread never touches a game object.
 2. Once per world tick, `Module::Update` drains the task queue (within a budget), then pumps the headless
    sessions, the command watchers, prompts, leases, state diffs and finally the event bus.
 3. Actions are performed by **injecting the client packet** (`CMSG_CAST_SPELL`, `CMSG_ATTACKSWING`, ...) into the
@@ -183,7 +183,7 @@ main (world) thread **after** all map updates have joined, so it is a safe place
 
 So the rule is:
 
-- **gRPC threads** check the server token, copy request fields, post a task, and write the response. Nothing else.
+- **gRPC threads** resolve the session token, copy request fields, post a task, and write the response. Nothing else.
 - **The world thread** does every game read and write, inside `Module::Update`.
 - **Hooks** (`OnPacketSent`, `OnUnitDeath`, ...) fire on whatever thread AC is on, often a map thread. They only
   check "is this a headless character, and does anyone care?", copy plain data, and return.
@@ -194,14 +194,15 @@ reports it (`Lagged`).
 
 ### 3.4 Leases: one driver per character ([PLAN.md §4.4](https://github.com/SimianJake/AzerothCore-SDK/blob/main/PLAN.md))
 
-Connecting needs the **server token** (`ACSDK.AuthToken`). Commanding a character needs that character's **lease
-token**: 256 random bits from OpenSSL, returned only to the claimant, compared in constant time, never logged.
-`controller_id` is only a label for logs and `ListLeases`; it grants nothing, so one controller cannot impersonate
-another. Observing (`GetState`, `Subscribe`, world queries) needs no lease.
+Every call needs an **account session** (log in with an AzerothCore account, §4.3), and a session only ever sees
+and drives its own account's characters. Commanding a character also needs that character's **lease token**: 256
+random bits from OpenSSL, returned only to the claimant, valid only together with the session that claimed it,
+compared in constant time, never logged. The label is only for logs and `ListLeases`; it grants nothing. Observing
+your own characters (`GetState`, `Subscribe`, world queries) needs no lease.
 
 A lease has a TTL (default 15 s). The Python `Character.lease()` context manager renews it in the background. If a
 controller dies, the lease expires, in-flight commands are cancelled, movement stops, and the character stays where
-it is (an "orphan"), claimable by anyone. It is not logged out unless `ACSDK.Lease.LogoutOnOrphanSec` is set.
+it is (an "orphan"), claimable again by its account. When a session ends, its leases end with it. It is not logged out unless `ACSDK.Lease.LogoutOnOrphanSec` is set.
 
 ### 3.5 Protocol reflexes and prompts ([PLAN.md §5.2](https://github.com/SimianJake/AzerothCore-SDK/blob/main/PLAN.md))
 
@@ -290,7 +291,7 @@ which registers three groups of scripts: world, packets and events.
 server. The header says which members other threads may touch (atomics, immutable config, and the few methods
 marked "any thread").
 
-`Module::Startup` ([AcsdkModule.cpp:21](../src/AcsdkModule.cpp#L21)):
+`Module::Startup` ([AcsdkModule.cpp:24](../src/AcsdkModule.cpp#L24)):
 
 1. Records the world thread id and loads [Config](../src/AcsdkConfig.cpp).
 2. Configures each component and wires them together with callbacks:
@@ -298,10 +299,11 @@ marked "any thread").
    - the CommandManager's **packet observer** sends every captured packet to `PublishPacketEvents` and the
      `PromptManager`;
    - its **result observer** publishes `CommandResult` events.
-3. Starts the gRPC listener (refuses if `ACSDK.AuthToken` is empty).
+3. Starts the gRPC listener (refuses unless `ACSDK.BindAddress` is a loopback address; warns if the obsolete
+   `ACSDK.AuthToken` is still set).
 4. Logs in `ACSDK.Autostart.Characters` (config-declared, so not autonomy).
 
-`Module::Update` ([AcsdkModule.cpp:214](../src/AcsdkModule.cpp#L214)) is the heart of the module.
+`Module::Update` ([AcsdkModule.cpp:258](../src/AcsdkModule.cpp#L258)) is the heart of the module.
 Each tick, in this order:
 
 | Step | Call | What it does |
@@ -311,14 +313,15 @@ Each tick, in this order:
 | 3 | `_runtime.Update()` | Pumps each headless session: query callbacks, login completion, reflexes, injected packets, logout |
 | 4 | `_commands.Update()` | Feeds captured SMSGs to watchers, polls state, times out commands |
 | 5 | `_prompts.Update()` | Declines expired prompts |
+| 5a | `UpdateSessions()` | Expires sessions, starts the periodic auth-DB recheck, and releases the leases of ended sessions (`LeaseLost(SESSION_ENDED)`) |
 | 6 | `UpdateLeases()` | Expires leases (→ `LeaseLost`, stop movement), forgets leases of gone characters, optional orphan logout |
 | 7 | `UpdateCharacterStates()` | Diffs lifecycle and dead/ghost/combat/teleporting/map per character → `CharacterStateChanged` |
 | 8 | `RunTickers()` | One-shot "call me every tick until I return false" callbacks (used by `WaitCommand`, DebugService) |
-| 9 | `_events.Dispatch()` | Last, so everything published this tick reaches subscribers now |
+| 9 | `_events.Dispatch()` | Last, so everything published this tick reaches subscribers now; then the streams of ended sessions are closed |
 
 Timing goes into `Stats` (`lastTickDispatchUs`, `maxTickDispatchUs`), which `GetStats` reports.
 
-`Module::Shutdown` ([AcsdkModule.cpp:256](../src/AcsdkModule.cpp#L256)) closes the queue, logs
+`Module::Shutdown` ([AcsdkModule.cpp:305](../src/AcsdkModule.cpp#L305)) closes the queue, logs
 every headless character out (`WorldSessionMgr::KickAll` never reaches our sessions), then stops gRPC. Because
 `grpc::Server::Shutdown` blocks until every RPC has finished and some RPCs finish on the world thread, the shutdown
 runs on a helper thread while the world thread keeps pumping the queue, DB callbacks, tickers and events
@@ -327,16 +330,20 @@ runs on a helper thread while the world thread keeps pumping the queue, DB callb
 ### 4.3 The gRPC layer
 
 **[GrpcServer](../src/rpc/GrpcServer.cpp)** builds one `grpc::Server` with the **callback
-(reactor) API** on gRPC's own small thread pool: no thread per controller, stream or character. It registers six
+(reactor) API** on gRPC's own small thread pool: no thread per controller, stream or character. It registers seven
 services, plus `DebugService` only when `ACSDK.Debug.Enable = 1`, and sets HTTP/2 keepalive so dead controller
-connections are reaped. The listener is insecure (no TLS) and binds `127.0.0.1` by default.
+connections are reaped. The listener is insecure (no TLS), so it refuses to bind anything but a loopback address.
 
-**[RpcCommon.h](../src/rpc/RpcCommon.h)** has the three helpers every handler uses:
+**[RpcCommon.h](../src/rpc/RpcCommon.h)** has the helpers every handler uses:
 
-- **`Authorize(ctx, reactor)`** checks `authorization: Bearer <token>` with `CRYPTO_memcmp`, counts the call, and
-  finishes with `UNAUTHENTICATED` on failure. It is a call at the top of each handler rather than an interceptor,
-  because gRPC C++ server interceptors cannot fail a call.
-- **`ControllerLabel(ctx)`** reads `x-acsdk-controller-id` (capped at 64 chars).
+- **`Authorize(ctx, reactor, caller)`** resolves the session named by `authorization: Bearer <session token>`,
+  counts the call, and finishes with `UNAUTHENTICATED` if there is none. It is a call at the top of each handler
+  rather than an interceptor, because gRPC C++ server interceptors cannot fail a call. `AuthorizeAdmin` also
+  requires an admin session.
+- **`CheckOwner(caller, guid)`**, on the world thread: the session is still live and the character is on its
+  account, else `UNAUTHENTICATED` / `PERMISSION_DENIED`.
+- **`ControllerLabel(ctx)`** reads `x-acsdk-controller-id` (capped at 64 chars); `Login` uses it as the session
+  label when the request has none.
 - **`PostToWorld(reactor, task)`** wraps the reactor in a `WorldCall` (which counts in-flight async calls for
   shutdown) and posts `task(call)` to the world queue. If the queue is full or closed, the RPC fails at once with
   `RESOURCE_EXHAUSTED`. The task finishes the call itself, now or later (for example when a command ends).
@@ -345,9 +352,11 @@ The typical handler shape:
 
 ```cpp
 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-if (!Authorize(ctx, reactor)) return reactor;       // gRPC thread: token check
-auto copied = request->field();                     // copy what the task needs
-PostToWorld(reactor, [copied, response](WorldCallPtr call) {
+Caller caller;
+if (!Authorize(ctx, reactor, caller)) return reactor; // gRPC thread: session check
+auto copied = request->field();                       // copy what the task needs
+PostToWorld(reactor, [caller, copied, response](WorldCallPtr call) {
+    if (grpc::Status s = CheckOwner(caller, guid); !s.ok()) { call->Finish(s); return; }
     /* world thread: touch game state, fill response */
     call->Finish(grpc::Status::OK);
 });
@@ -355,36 +364,98 @@ return reactor;
 ```
 
 Game-level failures (bad lease, offline character, spell failed) are **not** gRPC errors. The RPC returns OK with a
-`reason` field in the response. gRPC status codes are reserved for transport-level problems: `UNAUTHENTICATED`,
-`RESOURCE_EXHAUSTED`, `INVALID_ARGUMENT`, `PERMISSION_DENIED` (raw packets disabled).
+`reason` field in the response. gRPC status codes are reserved for transport- and access-level problems: `UNAUTHENTICATED` (no
+session), `PERMISSION_DENIED` (another account's character, not admin, raw packets disabled), `RESOURCE_EXHAUSTED`,
+`INVALID_ARGUMENT`.
 
 The services:
 
 | Service | File | Notes |
 |---|---|---|
-| `ServerService` | [ServerService.cpp](../src/rpc/ServerService.cpp) | `Health`, `GetInfo`, `GetStats`. Answers from atomics and never touches the world thread. Holds `SdkVersion = "1.0.0"`. |
-| `CharacterService` | [CharacterService.cpp](../src/rpc/CharacterService.cpp) | `List` (two chained async DB queries, accounts matching the prefix), `Login`, `Logout` (needs the lease token if leased), `GetState` (`FillState`, [:222](../src/rpc/CharacterService.cpp#L222)) |
+| `AuthService` | [AuthService.cpp](../src/rpc/AuthService.cpp) | `Login` (Basic credentials → session token), `Logout`, `WhoAmI`. See below. |
+| `ServerService` | [ServerService.cpp](../src/rpc/ServerService.cpp) | `Health`, `GetInfo` (no session needed; `api_minor`, `auth_modes`), `GetStats` (admin). Answers from atomics and never touches the world thread. Holds `SdkVersion = "1.1.0"`. |
+| `CharacterService` | [CharacterService.cpp](../src/rpc/CharacterService.cpp) | `List` (one async DB query, the session account's characters), `Login`, `Logout` (needs the lease token if leased), `GetState` (`FillState`, [:222](../src/rpc/CharacterService.cpp#L222)) |
 | `LeaseService` | [LeaseService.cpp](../src/rpc/LeaseService.cpp) | `ClaimCharacter`, `ReleaseCharacter`, `RenewLease`, `ListLeases` (labels and expiry only) |
 | `ActionService` | [ActionService.cpp](../src/rpc/ActionService.cpp) | Every command, `Cancel`, `WaitCommand`, `SendClientPacket` |
 | `WorldService` | [WorldService.cpp](../src/rpc/WorldService.cpp) | `NearbyObjects` (radius clamped to 1–100 yd), `FindPath`, `GetHeight`, `LineOfSight`, `GetObject`, `GetSpellInfo`/`GetItemInfo`/`GetCreatureInfo` |
 | `EventService` | [EventService.cpp](../src/rpc/EventService.cpp) | `Subscribe` (server stream), `RespondToPrompt` |
-| `DebugService` | [DebugService.cpp](../src/rpc/DebugService.cpp) | Dev only: `CreateAccount`, `CreateCharacter` for test provisioning |
+| `DebugService` | [DebugService.cpp](../src/rpc/DebugService.cpp) | Dev only, admin sessions only: `CreateAccount`, `CreateCharacter` for test provisioning |
 
-**ActionService's common path** is `SubmitCommand` ([ActionService.cpp:102](../src/rpc/ActionService.cpp#L102)).
-On the world thread it checks the lease, calls `CommandManager::Submit`, and then either:
+**ActionService's common path** is `SubmitCommand` ([ActionService.cpp:103](../src/rpc/ActionService.cpp#L103)).
+On the world thread it checks ownership and the session-bound lease, calls `CommandManager::Submit`, and then either:
 
 - `wait = true`: finishes the RPC from the command's done-callback with the terminal result; or
 - `wait = false`: answers right away with `STARTED` and the command id (or the terminal result if the command
   already failed synchronously, such as `NO_PATH`). The caller later uses `WaitCommand(id)`.
 
-`WaitCommand` ([:524](../src/rpc/ActionService.cpp#L524)) attaches to a running command, or answers
+`WaitCommand` ([:557](../src/rpc/ActionService.cpp#L557)) attaches to a running command, or answers
 from the bounded history of recent results (1024 entries). It bounds its own wait with a ticker and returns
 `STARTED` if the command is still running when the wait expires. Server-side command timeouts are capped at
 10 minutes (`TimeoutOr`).
 
-`SendClientPacket` ([:184](../src/rpc/ActionService.cpp#L184)) is the raw escape hatch. It needs
+`SendClientPacket` ([:191](../src/rpc/ActionService.cpp#L191)) is the raw escape hatch. It needs
 `ACSDK.RawPackets.Enable`, accepts only opcodes with a real client handler, refuses a denylist (login, character
 management, logout, auth), honours an optional allowlist, and rate-limits per character.
+
+#### Account sessions and authorization (1.1)
+
+SDK logins are ordinary AzerothCore game accounts (the `account` table's SRP6 salt and verifier). One login is one
+account, and a session acts only for that account's characters, exactly as a game client would. There is no shared
+server token any more; `ACSDK.AuthToken` is ignored with a warning.
+
+**Login** ([AuthService.cpp](../src/rpc/AuthService.cpp), [auth.proto](../proto/acsdk/v1/auth.proto)):
+
+1. On the gRPC thread, `Login` reads `authorization: Basic base64(user:pass)` (split at the first `:`), upper-cases
+   both parts with `Utf8ToUpperOnlyLatin` and enforces `MAX_ACCOUNT_STR` / `MAX_PASS_STR`, as AzerothCore does.
+2. [LoginThrottle](../src/auth/LoginThrottle.h) checks the in-memory backoff for the username and for the peer
+   address: three free failures, then 1 s, 2 s, 4 s ... up to 300 s (`RESOURCE_EXHAUSTED` while waiting). Nothing is
+   written to the auth DB. Every local client shares 127.0.0.1, so a misconfigured bot's failures delay the others.
+3. On the world thread, one async LoginDatabase query ([AccountAuth.cpp](../src/auth/AccountAuth.cpp)) reads id,
+   salt, verifier, `locked`, an active `account_banned` row and the GM level. `VerifyPassword` recomputes the
+   verifier with AzerothCore's SRP6 parameters (`SRP6::CalculateVerifier` is private, so the formula is repeated)
+   and compares it with `CRYPTO_memcmp`. An unknown account runs the same computation against a dummy salt, so
+   unknown user and wrong password take the same work and return the same `UNAUTHENTICATED`.
+4. With the right password, `AccountRefusal` may still refuse with `PERMISSION_DENIED`: `BANNED`, `LOCKED`
+   (AzerothCore's IP lock; the SDK has no client IP to compare, so it refuses), `GM_ACCOUNT` (gmlevel > 0 unless
+   `ACSDK.Auth.AllowGmAccounts = 1`) or `ACCOUNT_NOT_ELIGIBLE` (`ACSDK.HeadlessAccountPrefix`, empty = any account).
+5. [SessionManager](../src/auth/SessionManager.h) issues a 256-bit token (`GenerateLeaseToken`) and keeps only its
+   SHA-256, with the account id, username, label, admin flag and a fingerprint of the verifier. One session per
+   account: a new login ends the previous one (`REPLACED`).
+
+**Every other call** starts with `Authorize(ctx, reactor, caller)`, which resolves `authorization: Bearer <token>`
+under a shared lock (refreshing the sliding idle timer) or finishes with `UNAUTHENTICATED`. The resolved `Caller`
+(session id, account id, label, admin) is copied into every world task. On the world thread, `CheckOwner(caller,
+guid)` (next to every `CheckLease`) requires the session to still be live and
+`sCharacterCache->GetCharacterAccountIdByGuid(guid) == caller.accountId`; otherwise `PERMISSION_DENIED`, whether or
+not the character exists. Only `AuthService.Login`, `ServerService.Health` and `ServerService.GetInfo` work without
+a session.
+
+| RPC | Rule |
+|---|---|
+| `CharacterService.List` | the session account's characters only (one CharacterDatabase query) |
+| `CharacterService.Login` / `Logout` / `GetState` | owned only; `Login` by name resolves the guid first |
+| `LeaseService.*` | owned only; `ListLeases` lists only owned characters |
+| `ActionService.*`, `EventService.RespondToPrompt` | owned, and the lease must have been claimed by this session |
+| `ActionService.WaitCommand` | commands of other accounts' characters look like `UNKNOWN_COMMAND` |
+| `EventService.Subscribe` | every listed character owned (checked on the world thread before the stream starts); an empty list means all of the account's characters; the stream ends with `UNAUTHENTICATED` when the session ends |
+| `WorldService` centred on a character | the centre must be owned; static lookups (spell, item, creature) need only a session |
+| `ServerService.GetStats`, `DebugService` | admin sessions only (GM level >= `ACSDK.Auth.AdminGmLevel`); `DebugService` still only with `ACSDK.Debug.Enable` |
+
+Admin grants nothing over other accounts' characters. Because GM accounts are refused by default, an admin login
+also needs `ACSDK.Auth.AllowGmAccounts = 1`; and a GM account can never log characters in headless
+(`ACCOUNT_NOT_PLAYER_LEVEL`), so admin sessions are for diagnostics and test provisioning only.
+
+**Ending a session** (logout, idle `ACSDK.Auth.SessionIdleSec` / absolute `ACSDK.Auth.SessionMaxSec` expiry,
+replacement, revocation) queues it in `SessionManager`. `Module::UpdateSessions` then releases its leases with
+`LeaseLost("SESSION_ENDED")`, which cancels in-flight commands and stops movement, and after that tick's dispatch
+`EventBus::EndSession` closes its streams. Characters stay logged in. Every `ACSDK.Auth.RecheckSec` (60 s) an async
+query re-reads each live session's account and ends sessions whose account was deleted, banned, locked, changed
+password (verifier fingerprint) or GM level, or no longer matches the prefix (`REVOKED_*`). The console/GM commands
+`.acsdk session list` and `.acsdk session revoke <account>` ([AcsdkCommandScript.cpp](../src/AcsdkCommandScript.cpp))
+show and end sessions by hand.
+
+**Transport** is still plain HTTP/2: `GrpcServer::Start` refuses to listen on anything but a loopback address
+(`127.x.x.x`, `::1`, `localhost`) until TLS exists.
 
 ### 4.4 The headless runtime
 
@@ -454,13 +525,16 @@ It is filled from the hook:
 
 [leases/LeaseManager.h](../src/leases/LeaseManager.h) /
 [.cpp](../src/leases/LeaseManager.cpp) is pure logic over character guid counters: no game types, so
-it could be unit tested on its own. It runs on the world thread only.
+it is unit tested on its own ([SessionTests.cpp](../tests/cpp/SessionTests.cpp)). It runs on the world thread only.
 
 - `GenerateLeaseToken()`: 32 bytes from `RAND_bytes`, hex encoded. Throws rather than falling back to a weak RNG.
-- `Claim(guid, label, force)`: fails `AlreadyLeased` if someone holds an unexpired lease, unless `force` and
-  `AllowForceTakeover`. A forced claim reports the previous holder's label; the old token is simply overwritten,
-  which invalidates it.
-- `Release` / `Renew`: both require the current token (`Validate` = unexpired + `CRYPTO_memcmp`).
+- `Claim(guid, session, label, force)`: fails `AlreadyLeased` if someone holds an unexpired lease, unless `force`
+  and `AllowForceTakeover`. A forced claim reports the previous holder's label; the old token is simply overwritten,
+  which invalidates it. Since only the character's own account may claim it, and an account has one session, a
+  takeover only ever replaces another handle of the same session.
+- `Release` / `Renew`: both require the current token **and** the session that claimed it (`Validate` = unexpired +
+  same session + `CRYPTO_memcmp`). A lease token is useless to any other session.
+- `EndSession(session)` drops every lease of a session that ended and returns the affected characters.
 - `Expire(now)` returns the guids whose TTL ran out; `Forget` drops a lease without a token (character gone).
 
 The game-side consequences are in `Module`:
@@ -470,9 +544,11 @@ The game-side consequences are in `Module`:
 | TTL expiry | `UpdateLeases` → `PublishLeaseLost("EXPIRED")` + `OnLeaseEnded(stopMovement=true)` | Commands cancelled `LEASE_LOST`, `MotionMaster::Clear` + `StopMoving`, nothing else |
 | Forced takeover | `LeaseService.ClaimCharacter` → `OnLeaseTakenOver` | `LeaseLost("TAKEN_OVER")` to the old holder, its commands cancelled |
 | Release | `LeaseService.ReleaseCharacter` → `OnLeaseEnded(stopMovement=false)` | Commands cancelled `LEASE_RELEASED`; movement left as commanded |
+| Session ended | `UpdateSessions` → `LeaseManager::EndSession` → `PublishLeaseLost("SESSION_ENDED")` + `OnLeaseEnded(stopMovement=true)` | As expiry; the character stays logged in |
 | Character gone | `UpdateLeases` → `Forget` | Leases never outlive the headless character |
 
-The lease check for commands is `Module::CheckLease`, called first thing in every world-thread command task.
+The lease check for commands is `Module::CheckLease(guid, session, token)`, called right after `CheckOwner` in every
+world-thread command task.
 
 ### 4.6 Commands, channels and watchers
 
@@ -511,11 +587,11 @@ The four functions to read, in order:
    `BeginInteraction` ([Interactions.cpp:76](../src/commands/Interactions.cpp#L76)); for example,
    `Talk` picks `GOSSIP_HELLO`, `QUESTGIVER_HELLO` or `LIST_INVENTORY` from the NPC's flags, just as a client's
    right-click would.
-3. **`Update`** ([:385](../src/commands/Commands.cpp#L385)): each tick, takes every character's
+3. **`Update`** ([:395](../src/commands/Commands.cpp#L395)): each tick, takes every character's
    captured packets, runs the knockback reflex and the packet observer (events, prompts), then `HandlePacket` for
    the watchers. Then it polls every active command and times out those past their deadline.
-4. **`HandlePacket`** ([:495](../src/commands/Commands.cpp#L495)) and **`Poll`**
-   ([:623](../src/commands/Commands.cpp#L623)): the per-type completion rules.
+4. **`HandlePacket`** ([:505](../src/commands/Commands.cpp#L505)) and **`Poll`**
+   ([:633](../src/commands/Commands.cpp#L633)): the per-type completion rules.
 
 A few rules worth knowing when reading `HandlePacket` / `Poll`:
 
@@ -572,10 +648,10 @@ window, equipment).
 
 **[EventBus](../src/events/EventBus.h)** ([.cpp](../src/events/EventBus.cpp)):
 
-1. `Publish` ([:116](../src/events/EventBus.cpp#L116)), any thread: if nobody is subscribed, return.
+1. `Publish` ([:140](../src/events/EventBus.cpp#L140)), any thread: if nobody is subscribed, return.
    Otherwise append the self-contained event to a mutex-guarded ingress vector (capped at 65536; overflow is counted
    as dropped).
-2. `Dispatch` ([:131](../src/events/EventBus.cpp#L131)), world thread, once per tick: swap the
+2. `Dispatch` ([:155](../src/events/EventBus.cpp#L155)), world thread, once per tick: swap the
    ingress out, stamp sequence numbers and server time, wrap each event in a `shared_ptr` shared by every matching
    subscriber, and push it to each subscriber's bounded queue. If the subscriber's writer was idle, wake it.
 3. `EventSubscriber` holds a filter (characters, type bitmask, raw opcodes) and a bounded deque. On overflow it drops
@@ -583,10 +659,13 @@ window, equipment).
 4. Subscribing increments per-opcode counters (`_opcodeWants`), which the PacketSink's "extra wants" checks. **Event
    opcodes are only copied out of AC while someone is subscribed.**
 
-**[EventService.Subscribe](../src/rpc/EventService.cpp#L79)** is a `ServerWriteReactor`. The world
+**[EventService.Subscribe](../src/rpc/EventService.cpp#L119)** is a `ServerWriteReactor`. The world
 thread never writes to the network: the waker calls `StartWrite` with the next event, and `OnWriteDone` fetches the
 following one, on gRPC threads. A client that stops reading only fills its own queue. Raw-opcode subscriptions are
-refused unless `ACSDK.RawPackets.Enable`.
+refused unless `ACSDK.RawPackets.Enable`. The stream starts only after a world-thread task has checked that every
+listed character belongs to the caller's account (a `Gate` keeps that task from touching a reactor cancelled
+meanwhile); the subscriber's filter carries the account id, so `Matches` also drops other accounts' events, and the
+session id, so `EventBus::EndSession` can close it when the session ends.
 
 **Prompts** ([events/Prompts.h](../src/events/Prompts.h) /
 [.cpp](../src/events/Prompts.cpp)): `OnPacket` ([:39](../src/events/Prompts.cpp#L39))
@@ -599,7 +678,7 @@ subscribers, so unanswered prompts still time out.
 
 ### 4.9 State snapshots and world queries
 
-- **`GetState`** ([CharacterService.cpp:222](../src/rpc/CharacterService.cpp#L222), `FillState`)
+- **`GetState`** ([CharacterService.cpp:171](../src/rpc/CharacterService.cpp#L171), `FillState`)
   reads directly from the `Player` on the world thread. The request picks sections, so payloads stay small:
   `IDENTITY, POSITION, VITALS, STATUS, TARGET, MONEY, SPELLS, GROUP, CORPSE, EQUIPMENT, INVENTORY, QUESTS`. No
   sections means all of them. It needs no lease.
@@ -630,10 +709,12 @@ Template: [mod_acsdk.conf.dist](../conf/mod_acsdk.conf.dist).
 |---|---|---|
 | `ACSDK.Enable` | 1 | `Module::Startup` |
 | `ACSDK.BindAddress`, `ACSDK.Port` | `127.0.0.1`, 50051 | `GrpcServer::Start` |
-| `ACSDK.AuthToken` | empty (listener refuses to start) | `Authorize` |
+| `ACSDK.Auth.AllowGmAccounts`, `.AdminGmLevel` | 0, 3 | `AccountRefusal`, `IsAdmin` |
+| `ACSDK.Auth.SessionIdleSec`, `.SessionMaxSec`, `.RecheckSec` | 1800, 86400, 60 | `SessionManager`, `UpdateSessions` |
+| `ACSDK.AuthToken` | removed in 1.1.0; ignored with a warning | `Module::Startup` |
 | `ACSDK.MaxCommandsPerTick`, `ACSDK.MaxTickBudgetMs` | 200, 5 | `CommandQueue::Drain` |
 | `ACSDK.CommandQueueSize` | 4096 | `CommandQueue` |
-| `ACSDK.HeadlessAccountPrefix` | `acsdkhc` (upper-cased) | Login eligibility, `List` |
+| `ACSDK.HeadlessAccountPrefix` | `acsdkhc` (upper-cased; empty = any account) | SDK login and headless login eligibility |
 | `ACSDK.MaxListResults`, `ACSDK.MaxHeadlessCharacters` | 1000, 50 | `List`, `Login` |
 | `ACSDK.PacketSinkSize` | 256 | `PacketSink` |
 | `ACSDK.Reflex.TeleportAck`, `ACSDK.Reflex.Knockback` | 1, 1 | Reflexes |
@@ -697,13 +778,14 @@ azerothcore_sdk/
 ### 6.1 Plumbing layer
 
 - **[channel.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/plumbing/channel.py)**: `connect()` opens one insecure `grpc.aio`
-  channel with keepalive and two interceptors that add `authorization: Bearer <token>` and
+  channel with keepalive and two interceptors that add `authorization: Bearer <session token>` and
   `x-acsdk-controller-id` to every unary **and** server-streaming call. (The streaming interceptor was added in
-  Phase 4, when it turned out `Subscribe` calls were being rejected.) It also puts `_generated/` on `sys.path`,
+  Phase 4, when it turned out `Subscribe` calls were being rejected.) On `UNAUTHENTICATED` the unary interceptor
+  logs in once more (`SessionAuth.refresh`, one login at a time) and retries; streams are not retried. It also puts `_generated/` on `sys.path`,
   because protoc emits absolute `from acsdk.v1 import ...` imports.
 - **[errors.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/plumbing/errors.py)**: `translate(call)` converts gRPC errors into SDK
-  exceptions: `Unauthenticated`, `ServerBusy` (`RESOURCE_EXHAUSTED`), `ServerUnavailable`, `Timeout`, else
-  `RpcError`.
+  exceptions: `Unauthenticated`, `NotYourCharacter` (`PERMISSION_DENIED`; `AccountRefused` at login), `ServerBusy`
+  (`RESOURCE_EXHAUSTED`), `ServerUnavailable`, `Timeout`, else `RpcError`.
 - **[services.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/plumbing/services.py)**,
   **[actions.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/plumbing/actions.py)**,
   **[eventstream.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/plumbing/eventstream.py)**: one method per RPC taking plain
@@ -715,8 +797,9 @@ azerothcore_sdk/
 ### 6.2 Porcelain: Client and Character
 
 **[Client](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/client.py)** is one connection per controller. `connect()` (or `async with`)
-builds the channel and all plumbing services, and by default calls `Health` so a wrong token or a down server fails
-immediately. It exposes `server`, `characters` (`list`, `login`, `get`, `leases`), `world`, `events(...)`,
+builds the channel and all plumbing services, checks the server's API version with `GetInfo` (`IncompatibleServer`
+for a 1.0 module), and logs in with `username`/`password` (default `ACSDK_USERNAME`/`ACSDK_PASSWORD`), so a wrong
+password or a down server fails immediately. `close()` logs out. It exposes `server`, `characters` (`list`, `login`, `get`, `leases`), `world`, `events(...)`,
 `spells`, and `channel` (for unwrapped plumbing).
 
 **[Character](https://github.com/SimianJake/AzerothCore-SDK/blob/main/python/azerothcore_sdk/character.py)** is a handle by guid and name:
@@ -772,10 +855,10 @@ sequenceDiagram
 
     Py->>Py: SpellCache.resolve("Fireball") → spell id
     Py->>G: ActionService.CastSpell(ref{guid, lease_token}, spell_id, target, wait)
-    G->>G: Authorize (server token)
+    G->>G: Authorize (session token)
     G->>W: PostToWorld(task)
     Note over W: tick N: CommandQueue.Drain
-    W->>W: CheckLease, CommandManager.Submit
+    W->>W: CheckOwner, CheckLease, CommandManager.Submit
     W->>W: supersede old cast, castCount = k
     W->>S: Inject CMSG_CAST_SPELL(k, spell, target)
     Note over W: same tick: HeadlessRuntime.Update → DrainInjectedPackets
@@ -817,14 +900,20 @@ Run from the repo root: `python\.venv\Scripts\python.exe -m pytest tests -v`. Th
 
 | File | Covers |
 |---|---|
-| [test_phase2_leases.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase2_leases.py) | Server token required; two controllers + observer; same-label impersonation fails; forced takeover; dead controller orphans a character that stays put; GM `.tele` via reflex; GM `.kick` |
+| [test_phase2_leases.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase2_leases.py) | Two accounts drive their own characters; another account cannot use or claim a leased character; forced takeover; dead controller orphans a character that stays put; GM `.tele` via reflex; GM `.kick` |
+| [test_auth.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_auth.py) | Health/GetInfo without a session, login and `WhoAmI`, wrong password = unknown account, `List` shows only own characters, every cross-account call refused, ban refuses login and ends a live session, a replaced session ends its leases and streams, `.acsdk session revoke` + automatic re-login, admin-only calls |
+| [test_proto_pinned.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_proto_pinned.py) | The SDK's `proto/` copy matches this module's (no server needed) |
 | [test_phase3_actions.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase3_actions.py) | MoveTo, supersede, `NO_PATH`, say/whisper, cast failure reasons, cast correlation against another caster, kill a mob, commands need the token |
 | [test_phase4_events.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase4_events.py) | Whisper echo, group invite as a prompt, each occurrence delivered once, spell/aura events once each, a stalled subscriber doesn't slow the server |
 | [test_phase5_world.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase5_world.py) | FindPath plotted, height matches the ground, LoS agrees with the game, static lookups |
 | [test_phase6_interactions.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_phase6_interactions.py) | `CreateCharacter` stored name, new state sections, death calls refuse when alive, vendor + buy refusal, quest dialog and refusals, kill then loot |
 | [test_no_autonomy.py](https://github.com/SimianJake/AzerothCore-SDK/blob/main/tests/test_no_autonomy.py) | 30-minute run with unclaimed characters: nothing changes. Only with `ACSDK_SLOW=1` |
 
-### 8.2 C++ golden-byte tests
+### 8.2 C++ tests
+
+[tests/cpp/SessionTests.cpp](../tests/cpp/SessionTests.cpp), built as `acsdk-session-tests`: `SessionManager` (idle and
+absolute expiry, one session per account, logout/revoke, ended-session queue), `LoginThrottle` backoff, and leases
+bound to the session that claimed them (`EndSession`).
 
 [tests/cpp/PacketTests.cpp](../tests/cpp/PacketTests.cpp), built as `acsdk-packet-tests` when configured with `-DACSDK_BUILD_TESTS=ON`
 (`<build>/bin/<Config>/acsdk-packet-tests.exe`). Each builder's output and each decoder's input are checked against
@@ -842,7 +931,7 @@ variables).
 |---|---|
 | [link_module.ps1](../scripts/link_module.ps1) | Junctions this repo into `azerothcore-wotlk\modules\mod-acsdk` |
 | [build.ps1](../scripts/build.ps1) | Links the module, `vcpkg install` (manifest `deps\vcpkg.json`, triplet `x64-windows-static-md`), CMake configure if needed (VS 2026 generator, `MODULES=static`, `ACSDK_BUILD_TESTS=ON`), build, install |
-| [run_realm.ps1](../scripts/run_realm.ps1) | Starts MySQL, authserver and worldserver; on first run writes configs from `.dist` and generates a random `ACSDK.AuthToken` |
+| [run_realm.ps1](../scripts/run_realm.ps1) | Starts MySQL, authserver and worldserver; on first run writes configs from `.dist` |
 | [gen_enum_names.py](../scripts/gen_enum_names.py) | Regenerates `EnumNames.generated.h` from the AC source |
 
 The Python-side scripts (`gen_proto.ps1`, `build_sdk.ps1`, `make_index.py`) live in the SDK repository.
@@ -888,13 +977,13 @@ anything, and nothing was changed.
   discover them from the template.
 - **"Lock-free" wording vs. code.** [events.md](events.md) says EventBus ingress must be "a lock-free MPSC enqueue";
   the implementation is a short mutex-guarded `vector::push_back`
-  ([EventBus.cpp:116](../src/events/EventBus.cpp#L116)). The lock is never held across anything
+  ([EventBus.cpp:140](../src/events/EventBus.cpp#L140)). The lock is never held across anything
   slow, so it meets the intent (no blocking on slow work), but the docs and code describe it differently.
 - **Raw-packet rate-limit map is never pruned.** `RawRateOk` keeps a function-static
-  `unordered_map<ObjectGuid, Bucket>` ([ActionService.cpp:167](../src/rpc/ActionService.cpp#L167))
+  `unordered_map<ObjectGuid, Bucket>` ([ActionService.cpp:174](../src/rpc/ActionService.cpp#L174))
   that only grows, one entry per character that ever sent a raw packet. Tiny, and only with raw packets enabled.
 - **The `Module` constructor builds a placeholder `LeaseManager`** with hard-coded 15 s / takeover-on values
-  ([AcsdkModule.cpp:19](../src/AcsdkModule.cpp#L19)), replaced in `Startup` from config. Harmless,
+  ([AcsdkModule.cpp:21](../src/AcsdkModule.cpp#L21)), replaced in `Startup` from config. Harmless,
   but worth knowing if you wonder why the defaults appear twice.
 - **Lease renewal over the event stream** (PLAN §4.4 mentions it) is not implemented; the Python SDK uses
   `RenewLease` on a timer instead. Logged as "not done" in PLAN §13 (Phase 4).

@@ -1,6 +1,7 @@
 #include "HeadlessRuntime.h"
 
 #include "AcsdkModule.h"
+#include "AccountAuth.h"
 
 #include "CharacterCache.h"
 #include "Common.h"
@@ -229,9 +230,7 @@ namespace acsdk
 
                 Field* fields = result->Fetch();
                 std::string username = fields[0].Get<std::string>();
-                std::string upper = username;
-                std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-                if (_accountPrefix.empty() || upper.rfind(_accountPrefix, 0) != 0)
+                if (!MatchesAccountPrefix(username, _accountPrefix))
                 {
                     FinishLogin(*c, { false, "ACCOUNT_NOT_ELIGIBLE", guid, c->name });
                     return;

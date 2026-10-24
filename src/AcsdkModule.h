@@ -9,6 +9,8 @@
 #include "GrpcServer.h"
 #include "HeadlessRuntime.h"
 #include "LeaseManager.h"
+#include "LoginThrottle.h"
+#include "SessionManager.h"
 
 #include "AsyncCallbackProcessor.h"
 #include "DatabaseEnvFwd.h"
@@ -74,12 +76,18 @@ namespace acsdk
         CommandManager& Commands() { return _commands; }
         EventBus& Events() { return _events; }             // Publish/HasSubscribers are safe from any thread
         PromptManager& Prompts() { return _prompts; }
-        // True if `token` is the current lease token of `guid` (PLAN.md §4.4).
-        bool CheckLease(ObjectGuid guid, std::string const& token) const;
+        // True if `token` is the current lease token of `guid` and was issued to session `sessionId` (§4.3, §4.4).
+        bool CheckLease(ObjectGuid guid, uint64_t sessionId, std::string const& token) const;
+        // True if `guid` is a character on account `accountId` (CharacterCache).
+        bool Owns(uint32_t accountId, ObjectGuid guid) const;
         // A lease ended without the holder releasing it (expiry/takeover/release): stop movement, stay put.
         void OnLeaseEnded(ObjectGuid guid, bool stopMovement);
         bool IsRunning() const { return _server.IsRunning(); }
         bool IsWorldThread() const { return std::this_thread::get_id() == _worldThread; }
+
+        // Any thread (internally locked). Account sessions and failed-login backoff (ARCHITECTURE.md §4.3).
+        SessionManager& Sessions() { return *_sessions; }
+        LoginThrottle& Throttle() { return _throttle; }
 
         // Immutable once the listener runs.
         Config const& GetConfig() const { return _config; }
@@ -93,6 +101,7 @@ namespace acsdk
         void RunTickers();
         void UpdateLeases();
         void UpdateCharacterStates();
+        void UpdateSessions();
         void PublishLeaseLost(ObjectGuid guid, char const* reason, std::string const& newHolder);
 
     public:
@@ -108,6 +117,11 @@ namespace acsdk
         QueryCallbackProcessor _queries;
         HeadlessRuntime _runtime;
         std::unique_ptr<LeaseManager> _leases;
+        std::unique_ptr<SessionManager> _sessions;
+        LoginThrottle _throttle;
+        std::chrono::steady_clock::time_point _nextSessionSweep;
+        std::chrono::steady_clock::time_point _nextSessionRecheck;
+        std::vector<uint64_t> _endedStreams; // sessions whose event streams end after this tick's dispatch
         CommandManager _commands{ _runtime };
         EventBus _events;
         PromptManager _prompts{ _runtime, _events };

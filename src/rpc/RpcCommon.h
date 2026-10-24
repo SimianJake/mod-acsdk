@@ -4,50 +4,95 @@
 // gRPC before any AzerothCore header: MSVC resolves grpc::Slice's 'friend class ByteBuffer' to AC's
 // global ::ByteBuffer if that is declared first.
 #include <grpcpp/grpcpp.h>
-#include <openssl/crypto.h>
 
 #include "AcsdkModule.h"
 
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace acsdk
 {
-    // Constant-time check of "authorization: Bearer <ACSDK.AuthToken>". Never logs the token (PLAN.md §4.4).
-    inline bool HasValidServerToken(grpc::CallbackServerContext const* ctx, std::string const& expectedToken)
+    // The caller of an RPC: the account session named by its bearer token (ARCHITECTURE.md §4.3).
+    using Caller = SessionManager::Identity;
+
+    // The session token from "authorization: Bearer <token>"; empty if absent or another scheme. Never logged.
+    inline std::string BearerToken(grpc::CallbackServerContext const* ctx)
     {
         auto const& md = ctx->client_metadata();
         auto it = md.find("authorization");
         if (it == md.end())
-            return false;
+            return "";
 
         std::string_view value(it->second.data(), it->second.size());
         constexpr std::string_view prefix = "Bearer ";
-        if (value.size() != prefix.size() + expectedToken.size() || value.substr(0, prefix.size()) != prefix)
-            return false;
-
-        return CRYPTO_memcmp(value.data() + prefix.size(), expectedToken.data(), expectedToken.size()) == 0;
+        if (value.size() <= prefix.size() || value.substr(0, prefix.size()) != prefix)
+            return "";
+        return std::string(value.substr(prefix.size()));
     }
 
-    // Every handler starts with this. Counts the call and, if the server token is wrong, finishes the
-    // reactor with UNAUTHENTICATED and returns false.
+    // For the calls that need no session (AuthService.Login, ServerService.Health/GetInfo): counts them.
+    inline void CountCall()
+    {
+        sAcsdk.GetStats().rpcsTotal.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Resolves the caller's session without finishing anything (streams reject on their own).
+    inline std::optional<Caller> ResolveCaller(grpc::CallbackServerContext const* ctx)
+    {
+        CountCall();
+        std::optional<Caller> caller = sAcsdk.Sessions().Resolve(BearerToken(ctx), SessionManager::Clock::now());
+        if (!caller)
+            sAcsdk.GetStats().rpcsUnauthenticated.fetch_add(1, std::memory_order_relaxed);
+        return caller;
+    }
+
+    inline grpc::Status NoSession()
+    {
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing, invalid or expired session; log in with AuthService.Login");
+    }
+
+    // Every handler that needs a session starts with this. Counts the call and resolves the caller's
+    // session; if there is none, finishes the reactor with UNAUTHENTICATED and returns false.
     //
     // gRPC C++ server interceptors cannot fail a call, so the check lives here rather than in an
     // interceptor; one call per handler keeps it impossible to miss in review.
-    inline bool Authorize(grpc::CallbackServerContext* ctx, grpc::ServerUnaryReactor* reactor)
+    inline bool Authorize(grpc::CallbackServerContext* ctx, grpc::ServerUnaryReactor* reactor, Caller& caller)
     {
-        Stats& stats = sAcsdk.GetStats();
-        stats.rpcsTotal.fetch_add(1, std::memory_order_relaxed);
+        std::optional<Caller> resolved = ResolveCaller(ctx);
+        if (!resolved)
+        {
+            reactor->Finish(NoSession());
+            return false;
+        }
+        caller = std::move(*resolved);
+        return true;
+    }
 
-        if (HasValidServerToken(ctx, sAcsdk.GetConfig().authToken))
+    // Authorize, and the session must be an admin's (GM level >= ACSDK.Auth.AdminGmLevel).
+    inline bool AuthorizeAdmin(grpc::CallbackServerContext* ctx, grpc::ServerUnaryReactor* reactor, Caller& caller)
+    {
+        if (!Authorize(ctx, reactor, caller))
+            return false;
+        if (caller.admin)
             return true;
-
-        stats.rpcsUnauthenticated.fetch_add(1, std::memory_order_relaxed);
-        reactor->Finish(grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing or invalid server token"));
+        reactor->Finish(grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "admin session required (ACSDK.Auth.AdminGmLevel)"));
         return false;
     }
 
-    // x-acsdk-controller-id: a human-readable label for logs and ListLeases. It grants nothing (PLAN.md §4.4).
+    // World thread, next to every CheckLease: the caller's session is still live and `guid` is a character on
+    // its account. A character of another account is PERMISSION_DENIED whether or not it exists.
+    inline grpc::Status CheckOwner(Caller const& caller, ObjectGuid guid)
+    {
+        if (!sAcsdk.Sessions().IsActive(caller.sessionId, SessionManager::Clock::now()))
+            return NoSession();
+        if (!sAcsdk.Owns(caller.accountId, guid))
+            return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "character is not on this session's account");
+        return grpc::Status::OK;
+    }
+
+    // x-acsdk-controller-id: a human-readable label for logs and ListLeases. It grants nothing (PLAN.md §4.4);
+    // AuthService.Login uses it as the session label when the request has none.
     inline std::string ControllerLabel(grpc::CallbackServerContext const* ctx)
     {
         auto const& md = ctx->client_metadata();

@@ -14,11 +14,16 @@ namespace acsdk
         bool enable = true;
         std::string bindAddress = "127.0.0.1";
         uint16_t port = 50051;
-        std::string authToken;
+        bool authAllowGmAccounts = false;       // GM accounts (gmlevel > 0) may log in to the SDK
+        uint32_t authAdminGmLevel = 3;          // sessions of accounts at or above this GM level are admin
+        uint32_t authSessionIdleSec = 1800;     // sliding idle timeout
+        uint32_t authSessionMaxSec = 86400;     // absolute session lifetime
+        uint32_t authRecheckSec = 60;           // how often live sessions are checked against the auth DB
+        bool legacyAuthTokenSet = false;        // ACSDK.AuthToken (1.0) is still in the config; ignored
         uint32_t maxCommandsPerTick = 200;
         uint32_t maxTickBudgetMs = 5;
         uint32_t commandQueueSize = 4096;
-        std::string headlessAccountPrefix = "ACSDKHC"; // AzerothCore stores usernames upper-case
+        std::string headlessAccountPrefix = "ACSDKHC"; // upper-case like AzerothCore usernames; empty = any account
         uint32_t maxListResults = 1000;
         uint32_t maxHeadlessCharacters = 50;
         bool reflexTeleportAck = true;

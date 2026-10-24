@@ -1,5 +1,7 @@
 #include "AcsdkModule.h"
 
+#include "AccountAuth.h"
+#include "CharacterCache.h"
 #include "Errors.h"
 #include "MotionMaster.h"
 #include "Player.h"
@@ -16,7 +18,8 @@ namespace acsdk
         return instance;
     }
 
-    Module::Module() : _queue(4096), _leases(std::make_unique<LeaseManager>(GenerateLeaseToken, std::chrono::seconds(15), true)) { }
+    Module::Module() : _queue(4096), _leases(std::make_unique<LeaseManager>(GenerateLeaseToken, std::chrono::seconds(15), true)),
+        _sessions(std::make_unique<SessionManager>(GenerateLeaseToken, std::chrono::seconds(1800), std::chrono::seconds(86400))) { }
 
     void Module::Startup(std::string realmName, std::string coreRevision)
     {
@@ -29,10 +32,16 @@ namespace acsdk
             return;
         }
 
+        if (_config.legacyAuthTokenSet)
+            LOG_WARN("module", "mod-acsdk: ACSDK.AuthToken is no longer used and is ignored; SDK clients log in with AzerothCore accounts (ACSDK.Auth.*).");
+
         _queue.SetCapacity(_config.commandQueueSize);
         _runtime.Configure(_config.headlessAccountPrefix, _config.maxHeadlessCharacters, _config.packetSinkSize);
         _commands.SetKnockbackReflex(_config.reflexKnockback);
         _leases = std::make_unique<LeaseManager>(GenerateLeaseToken, std::chrono::seconds(_config.leaseTtlSec), _config.leaseAllowForceTakeover);
+        _sessions = std::make_unique<SessionManager>(GenerateLeaseToken, std::chrono::seconds(_config.authSessionIdleSec), std::chrono::seconds(_config.authSessionMaxSec));
+        _nextSessionRecheck = std::chrono::steady_clock::now() + std::chrono::seconds(_config.authRecheckSec);
+        EventSubscriber::SetOwnerOf([](uint64_t characterGuid) { return sCharacterCache->GetCharacterAccountIdByGuid(ObjectGuid::Create<HighGuid::Player>(static_cast<ObjectGuid::LowType>(characterGuid))); });
         _events.SetQueueCapacity(_config.eventQueueSize);
         _events.SetEventOpcodes(EventSourceOpcodes());
         _prompts.SetTimeout(std::chrono::seconds(_config.promptTimeoutSec));
@@ -77,9 +86,44 @@ namespace acsdk
         }
     }
 
-    bool Module::CheckLease(ObjectGuid guid, std::string const& token) const
+    bool Module::CheckLease(ObjectGuid guid, uint64_t sessionId, std::string const& token) const
     {
-        return _leases->Validate(guid.GetCounter(), token, LeaseManager::Clock::now());
+        return _leases->Validate(guid.GetCounter(), sessionId, token, LeaseManager::Clock::now());
+    }
+
+    bool Module::Owns(uint32_t accountId, ObjectGuid guid) const
+    {
+        return accountId != 0 && guid.IsPlayer() && sCharacterCache->GetCharacterAccountIdByGuid(guid) == accountId;
+    }
+
+    // Ends expired sessions, rechecks live ones against the auth DB, and cleans up after every session that
+    // ended (logout, expiry, replacement, revocation): its leases are released with LeaseLost(SESSION_ENDED),
+    // which cancels their in-flight commands, and its event streams end. Characters stay logged in.
+    void Module::UpdateSessions()
+    {
+        auto const now = std::chrono::steady_clock::now();
+        if (now >= _nextSessionSweep)
+        {
+            _sessions->Expire(now);
+            _nextSessionSweep = now + std::chrono::seconds(1);
+        }
+        if (now >= _nextSessionRecheck)
+        {
+            _nextSessionRecheck = now + std::chrono::seconds(_config.authRecheckSec);
+            RecheckSessions();
+        }
+
+        for (SessionManager::Ended const& ended : _sessions->TakeEnded())
+        {
+            LOG_INFO("module", "mod-acsdk: session {} of account {} ({}) ended: {}.", ended.sessionId, ended.username, ended.accountId, ended.reason);
+            for (uint64_t counter : _leases->EndSession(ended.sessionId))
+            {
+                ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(static_cast<ObjectGuid::LowType>(counter));
+                PublishLeaseLost(guid, "SESSION_ENDED", "");
+                OnLeaseEnded(guid, true);
+            }
+            _endedStreams.push_back(ended.sessionId);
+        }
     }
 
     void Module::OnLeaseEnded(ObjectGuid guid, bool stopMovement)
@@ -228,10 +272,15 @@ namespace acsdk
         _runtime.Update();
         _commands.Update();
         _prompts.Update();
+        UpdateSessions();
         UpdateLeases();
         UpdateCharacterStates();
         RunTickers();
         _events.Dispatch(); // last: everything published this tick reaches subscribers now
+        // After dispatch, so a stream whose session ended still gets this tick's LeaseLost(SESSION_ENDED).
+        for (uint64_t sessionId : _endedStreams)
+            _events.EndSession(sessionId);
+        _endedStreams.clear();
 
         auto const us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(CommandQueue::Clock::now() - start).count());
         _stats.commandsExecuted.fetch_add(ran, std::memory_order_relaxed);

@@ -130,10 +130,18 @@ namespace acsdk
         grpc::ServerUnaryReactor* OnCharacter(grpc::CallbackServerContext* ctx, uint64_t characterGuid, Response* response, Fn fn)
         {
             grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-            if (!Authorize(ctx, reactor))
+            Caller caller;
+            if (!Authorize(ctx, reactor, caller))
                 return reactor;
-            PostToWorld(reactor, [characterGuid, response, fn](WorldCallPtr call)
+            PostToWorld(reactor, [caller, characterGuid, response, fn](WorldCallPtr call)
             {
+                // Queries centred on a character need it to be the caller's own (ARCHITECTURE.md §4.3).
+                if (grpc::Status owner = CheckOwner(caller, PlayerGuidFromApi(characterGuid)); !owner.ok())
+                {
+                    call->Finish(owner);
+                    return;
+                }
+
                 Player* center = Center(characterGuid);
                 if (!center)
                 {
@@ -225,7 +233,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* GetItemInfo(grpc::CallbackServerContext* ctx, v1::GetItemInfoRequest const* request, v1::GetItemInfoResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller; // static data: any session
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
                 std::vector<uint32> ids(request->item_ids().begin(), request->item_ids().end());
                 if (ids.size() > 1000)
@@ -254,7 +263,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* GetCreatureInfo(grpc::CallbackServerContext* ctx, v1::GetCreatureInfoRequest const* request, v1::GetCreatureInfoResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller; // static data: any session
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
                 std::vector<uint32> ids(request->entries().begin(), request->entries().end());
                 if (ids.size() > 1000)
@@ -281,17 +291,27 @@ namespace acsdk
             grpc::ServerUnaryReactor* NearbyObjects(grpc::CallbackServerContext* ctx, v1::NearbyObjectsRequest const* request, v1::NearbyObjectsResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
                 v1::NearbyObjectsRequest copy = *request;
-                PostToWorld(reactor, [copy, response](WorldCallPtr call) { NearbyOnWorldThread(std::move(call), copy, response); });
+                PostToWorld(reactor, [caller, copy, response](WorldCallPtr call)
+                {
+                    if (grpc::Status owner = CheckOwner(caller, PlayerGuidFromApi(copy.character_guid())); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+                    NearbyOnWorldThread(std::move(call), copy, response);
+                });
                 return reactor;
             }
 
             grpc::ServerUnaryReactor* GetSpellInfo(grpc::CallbackServerContext* ctx, v1::GetSpellInfoRequest const* request, v1::GetSpellInfoResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller; // static data: any session
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
                 if (request->spell_ids_size() > 1000)
                 {

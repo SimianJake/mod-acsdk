@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package acsdk.v1;
 
-// Server-level information and diagnostics (PLAN.md §7).
+// Server-level information and diagnostics (PLAN.md §7). Health and GetInfo need no session;
+// GetStats needs an admin session (ACSDK.Auth.AdminGmLevel).
 service ServerService {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
@@ -25,6 +26,8 @@ message GetInfoResponse {
   uint64 uptime_ms = 5;         // since the gRPC listener started
   uint64 world_ticks = 6;       // WorldScript::OnUpdate calls seen
   uint32 last_tick_diff_ms = 7; // diff passed to the most recent OnUpdate
+  uint32 api_minor = 8;         // additive revisions within api_version: 0 = 1.0 (shared token), 1 = 1.1 (account sessions)
+  repeated string auth_modes = 9; // login methods AuthService.Login accepts, e.g. "basic"
 }
 
 message GetStatsRequest {}

@@ -1,5 +1,6 @@
 /*
- * Development-only helpers (proto/acsdk/v1/debug.proto). Served only when ACSDK.Debug.Enable = 1.
+ * Development-only helpers (proto/acsdk/v1/debug.proto). Served only when ACSDK.Debug.Enable = 1, and only to
+ * admin sessions (ACSDK.Auth.AdminGmLevel).
  * Test provisioning only: account and character creation stay outside the SDK proper (PLAN.md §5.1).
  */
 
@@ -8,6 +9,8 @@
 #include "Services.h"
 
 #include "EnumNames.generated.h"
+
+#include "AccountAuth.h"
 
 #include "AccountMgr.h"
 #include "ByteBuffer.h"
@@ -45,11 +48,9 @@ namespace acsdk
             return code;
         }
 
-        bool MatchesHeadlessPrefix(std::string name)
+        bool MatchesHeadlessPrefix(std::string const& name)
         {
-            std::string const& prefix = sAcsdk.GetConfig().headlessAccountPrefix;
-            std::transform(name.begin(), name.end(), name.begin(), ::toupper);
-            return !prefix.empty() && name.rfind(prefix, 0) == 0;
+            return MatchesAccountPrefix(name, sAcsdk.GetConfig().headlessAccountPrefix);
         }
 
         // Drives AzerothCore's own character creation for a test account: a temporary socketless session
@@ -155,7 +156,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* CreateAccount(grpc::CallbackServerContext* ctx, v1::CreateAccountRequest const* request, v1::DebugResult* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!AuthorizeAdmin(ctx, reactor, caller))
                     return reactor;
 
                 std::string username = request->username();
@@ -188,7 +190,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* CreateCharacter(grpc::CallbackServerContext* ctx, v1::CreateCharacterRequest const* request, v1::CreateCharacterResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!AuthorizeAdmin(ctx, reactor, caller))
                     return reactor;
 
                 v1::CreateCharacterRequest copy = *request;

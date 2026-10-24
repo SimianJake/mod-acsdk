@@ -35,37 +35,43 @@ Programs talk to it with the Python SDK, [AzerothCore-SDK](https://github.com/Si
      Debian/Ubuntu). The Linux build has not been tested yet; reports are welcome.
 
 3. **Re-run CMake and rebuild** AzerothCore as you normally do (`MODULES=static` is the default). The module adds
-   itself to `worldserver`. The packet tests are off by default; add `-DACSDK_BUILD_TESTS=ON` to build
-   `acsdk-packet-tests`.
+   itself to `worldserver`. The C++ tests are off by default; add `-DACSDK_BUILD_TESTS=ON` to build
+   `acsdk-packet-tests` and `acsdk-session-tests`.
 
 4. **Configure.** The install step copies `mod_acsdk.conf.dist` into `configs/modules/`. Copy it to
    `mod_acsdk.conf` and set at least:
 
    | Setting | What to set |
    |---|---|
-   | `ACSDK.AuthToken` | A long random secret. The listener refuses to start while it is empty. Everyone with it can drive eligible characters. |
-   | `ACSDK.BindAddress` / `ACSDK.Port` | Default `127.0.0.1:50051`. Keep it on localhost unless you have a reason not to (see Security). |
-   | `ACSDK.HeadlessAccountPrefix` | Only characters on accounts whose names start with this (default `acsdkhc`) can be listed or driven. |
+   | `ACSDK.BindAddress` / `ACSDK.Port` | Default `127.0.0.1:50051`. The listener only binds loopback addresses (no TLS yet; see Security). |
+   | `ACSDK.HeadlessAccountPrefix` | Only accounts whose names start with this (default `acsdkhc`) may log in to the SDK. Empty = any account. |
+   | `ACSDK.Auth.*` | Session idle/absolute timeouts, whether GM accounts may log in, and the admin GM level. The defaults are fine. |
    | `ACSDK.Debug.Enable` | Leave at `0`. It serves a development-only service that creates accounts and characters. |
 
    Every setting is documented in [conf/mod_acsdk.conf.dist](conf/mod_acsdk.conf.dist).
 
-5. **Create accounts for SDK use** with the normal AzerothCore tools (for example `.account create acsdkhcbot1 <password>`
-   in the worldserver console), then create characters on them. Keep these accounts player-level, not GM: chat
-   commands from a GM account would run as GM commands. One character per account can be online at a time.
+5. **Create accounts for SDK use** with the normal AzerothCore tools (for example `account create acsdkhcbot1 <password>`
+   in the worldserver console), then create characters on them. SDK users log in with these accounts' names and
+   passwords, and each login can see and drive only its own account's characters. Keep these accounts
+   player-level, not GM: GM accounts are refused by default (`ACSDK.Auth.AllowGmAccounts`), and chat commands from a
+   GM account would run as GM commands. One character per account can be online at a time.
 
 6. **Start worldserver.** Its log shows `mod-acsdk: gRPC listener started on 127.0.0.1:50051.`
 
 ## Giving people access
 
-SDK users need three things from you: the address (`127.0.0.1:50051` when they run on the same machine), the
-`ACSDK.AuthToken`, and the names of the characters they may drive. They then follow
+SDK users need two things from you: the address (`127.0.0.1:50051` when they run on the same machine) and an
+account (name and password) whose characters they may drive. Give each user their own account. Use
+`.acsdk session list` and `.acsdk session revoke <account>` in the worldserver console to see and end SDK sessions. They then follow
 [installation.md](https://github.com/SimianJake/AzerothCore-SDK/blob/main/docs/installation.md) in the SDK
 repository.
 
 ## Security
 
-The gRPC connection is not encrypted and every controller shares one token. Keep the listener on localhost. For
+Each SDK user logs in with their own AzerothCore account and can only see and drive that account's characters;
+banning, locking or changing the password of an account ends its SDK session within a minute. The gRPC connection
+is not encrypted (passwords and session tokens cross it in plain text), so the listener refuses to bind anything
+but localhost. For
 users on other machines, prefer an SSH tunnel or a private network (such as Tailscale) over opening the port to the
 internet. Controllers can only ever drive characters on prefix-matched accounts, never real players.
 

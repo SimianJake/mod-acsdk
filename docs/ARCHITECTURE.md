@@ -407,9 +407,11 @@ server token any more; `ACSDK.AuthToken` is ignored with a warning.
 
 1. On the gRPC thread, `Login` reads `authorization: Basic base64(user:pass)` (split at the first `:`), upper-cases
    both parts with `Utf8ToUpperOnlyLatin` and enforces `MAX_ACCOUNT_STR` / `MAX_PASS_STR`, as AzerothCore does.
-2. [LoginThrottle](../src/auth/LoginThrottle.h) checks the in-memory backoff for the username and for the peer
-   address: three free failures, then 1 s, 2 s, 4 s ... up to 300 s (`RESOURCE_EXHAUSTED` while waiting). Nothing is
-   written to the auth DB. Every local client shares 127.0.0.1, so a misconfigured bot's failures delay the others.
+2. Two [LoginThrottle](../src/auth/LoginThrottle.h)s check the in-memory backoff (`RESOURCE_EXHAUSTED` while
+   waiting; nothing is written to the auth DB). Per username: three free failures, then 1 s, 2 s, 4 s ... up to
+   300 s. Per peer address: 20 free failures, then up to 60 s, against spraying many usernames. The peer allowance
+   is generous because every local client shares 127.0.0.1: one bot's wrong password holds back only its own
+   username, not the other clients on the machine.
 3. On the world thread, one async LoginDatabase query ([AccountAuth.cpp](../src/auth/AccountAuth.cpp)) reads id,
    salt, verifier, `locked`, an active `account_banned` row and the GM level. `VerifyPassword` recomputes the
    verifier with AzerothCore's SRP6 parameters (`SRP6::CalculateVerifier` is private, so the formula is repeated)
@@ -444,6 +446,9 @@ a session.
 Admin grants nothing over other accounts' characters. Because GM accounts are refused by default, an admin login
 also needs `ACSDK.Auth.AllowGmAccounts = 1`; and a GM account can never log characters in headless
 (`ACCOUNT_NOT_PLAYER_LEVEL`), so admin sessions are for diagnostics and test provisioning only.
+
+An open event stream counts as use: once a second `UpdateSessions` touches every session with a live stream
+(`EventBus::StreamSessions`), so a client that only listens is not expired as idle (the absolute limit still applies).
 
 **Ending a session** (logout, idle `ACSDK.Auth.SessionIdleSec` / absolute `ACSDK.Auth.SessionMaxSec` expiry,
 replacement, revocation) queues it in `SessionManager`. `Module::UpdateSessions` then releases its leases with

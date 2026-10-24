@@ -87,7 +87,10 @@ namespace acsdk
 
         // Any thread (internally locked). Account sessions and failed-login backoff (ARCHITECTURE.md §4.3).
         SessionManager& Sessions() { return *_sessions; }
-        LoginThrottle& Throttle() { return _throttle; }
+        // Failed-login backoff: strict per username; per peer address only against spraying many usernames, with
+        // a generous allowance because every local client shares 127.0.0.1 (one bot's typo must not lock out others).
+        LoginThrottle& UserThrottle() { return _userThrottle; }
+        LoginThrottle& PeerThrottle() { return _peerThrottle; }
 
         // Immutable once the listener runs.
         Config const& GetConfig() const { return _config; }
@@ -118,7 +121,8 @@ namespace acsdk
         HeadlessRuntime _runtime;
         std::unique_ptr<LeaseManager> _leases;
         std::unique_ptr<SessionManager> _sessions;
-        LoginThrottle _throttle;
+        LoginThrottle _userThrottle{ 3, std::chrono::seconds(1), std::chrono::seconds(300) };
+        LoginThrottle _peerThrottle{ 20, std::chrono::seconds(1), std::chrono::seconds(60) };
         std::chrono::steady_clock::time_point _nextSessionSweep;
         std::chrono::steady_clock::time_point _nextSessionRecheck;
         std::vector<uint64_t> _endedStreams; // sessions whose event streams end after this tick's dispatch

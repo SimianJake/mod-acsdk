@@ -63,6 +63,8 @@ namespace acsdk
         std::optional<Identity> Resolve(std::string const& token, Clock::time_point now);
 
         bool IsActive(uint64_t sessionId, Clock::time_point now) const;
+        // Counts as use of the session (resets the idle timer, not the absolute limit), e.g. an open event stream.
+        void Touch(uint64_t sessionId, Clock::time_point now);
         // When the session ends unless it is used again: the earlier of the idle and absolute limits.
         std::optional<Clock::time_point> ExpiresAt(uint64_t sessionId) const;
 

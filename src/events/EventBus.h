@@ -96,6 +96,8 @@ namespace acsdk
         void Unsubscribe(EventSubscriber const* subscriber);
         // World thread: end every stream of `sessionId` (the session ended).
         void EndSession(uint64_t sessionId);
+        // Sessions with at least one open stream (an open stream keeps its session alive).
+        std::vector<uint64_t> StreamSessions() const;
 
         void SetQueueCapacity(std::size_t capacity) { _capacity = capacity; }
         void SetEventOpcodes(std::vector<uint16_t> opcodes);

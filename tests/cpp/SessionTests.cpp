@@ -69,6 +69,25 @@ static void AbsoluteLifetime()
     Expect("max/expires-at-cap", exp && *exp == t0 + 120s);
 }
 
+static void TouchKeepsAlive()
+{
+    SessionManager sm(Counter, 60s, 300s);
+    auto t0 = SessionManager::Clock::time_point{} + 1000s;
+    uint64_t id = 0;
+    sm.Create(1, "A", "", false, "", t0, &id);
+    // No calls, only touches (an open event stream): the idle timer keeps resetting.
+    for (int s = 50; s <= 250; s += 50)
+        sm.Touch(id, t0 + std::chrono::seconds(s));
+    Expect("touch/alive-after-idle-period", sm.IsActive(id, t0 + 280s));
+    Expect("touch/absolute-cap-still-applies", !sm.IsActive(id, t0 + 300s));
+    // Touching an expired session does not revive it.
+    SessionManager sm2(Counter, 60s, 300s);
+    uint64_t id2 = 0;
+    sm2.Create(2, "B", "", false, "", t0, &id2);
+    sm2.Touch(id2, t0 + 61s);
+    Expect("touch/no-revive", !sm2.IsActive(id2, t0 + 62s));
+}
+
 static void OneSessionPerAccount()
 {
     SessionManager sm(Counter, 60s, 600s);
@@ -125,6 +144,19 @@ static void Throttle()
     t.Failure({ "user:C" }, t0);
     t.Failure({ "user:C" }, t0 + 901s);
     Expect("throttle/forgotten", t.RetryAfter({ "user:C" }, t0 + 901s).count() == 0);
+
+    // The module's split: strict per user, generous per peer (all local clients share 127.0.0.1).
+    LoginThrottle users(3, 1s, 300s), peers(20, 1s, 60s);
+    for (int i = 0; i < 4; ++i)
+    {
+        users.Failure({ "user:TYPO" }, t0);
+        peers.Failure({ "peer:local" }, t0);
+    }
+    Expect("split/typo-user-held-back", users.RetryAfter({ "user:TYPO" }, t0).count() > 0);
+    Expect("split/other-users-unaffected", users.RetryAfter({ "user:OK" }, t0).count() == 0 && peers.RetryAfter({ "peer:local" }, t0).count() == 0);
+    for (int i = 0; i < 16; ++i)
+        peers.Failure({ "peer:local" }, t0);
+    Expect("split/spraying-held-back", peers.RetryAfter({ "peer:local" }, t0).count() > 0);
 }
 
 static void LeasesBoundToSession()
@@ -159,6 +191,7 @@ int main()
 {
     SessionBasics();
     AbsoluteLifetime();
+    TouchKeepsAlive();
     OneSessionPerAccount();
     Throttle();
     LeasesBoundToSession();

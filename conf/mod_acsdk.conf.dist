@@ -50,8 +50,8 @@ ACSDK.Auth.AdminGmLevel = 3
 
 #
 #    ACSDK.Auth.SessionIdleSec / ACSDK.Auth.SessionMaxSec
-#        Description: A session ends after SessionIdleSec without a call (sliding), and in any case
-#                     SessionMaxSec after login. Its leases are then released (LeaseLost SESSION_ENDED)
+#        Description: A session ends after SessionIdleSec without a call or an open event stream
+#                     (sliding), and in any case SessionMaxSec after login. Its leases are then released (LeaseLost SESSION_ENDED)
 #                     and its event streams end; its characters stay logged in.
 #        Default:     1800 / 86400
 #

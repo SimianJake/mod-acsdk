@@ -24,7 +24,7 @@ message AuthLoginResponse {
   uint32 account_id = 2;
   string username = 3;        // as stored by AzerothCore (upper-case)
   bool admin = 4;             // GM level >= ACSDK.Auth.AdminGmLevel
-  uint32 idle_timeout_s = 5;  // session ends after this long without a call
+  uint32 idle_timeout_s = 5;  // session ends after this long without a call or an open event stream
   uint32 max_lifetime_s = 6;  // and in any case this long after Login
 }
 

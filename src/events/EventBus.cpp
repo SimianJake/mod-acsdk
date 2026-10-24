@@ -239,6 +239,16 @@ namespace acsdk
                 e.waker(); // under the lock, as in Dispatch
     }
 
+    std::vector<uint64_t> EventBus::StreamSessions() const
+    {
+        std::lock_guard lock(_subscribersMutex);
+        std::vector<uint64_t> out;
+        for (Entry const& e : _subscribers)
+            if (uint64_t id = e.subscriber->GetFilter().sessionId; id && !e.subscriber->Closed())
+                out.push_back(id);
+        return out;
+    }
+
     std::size_t EventBus::SubscriberCount() const
     {
         return static_cast<std::size_t>(std::max(0, _subscriberCount.load(std::memory_order_relaxed)));

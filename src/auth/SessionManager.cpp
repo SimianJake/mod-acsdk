@@ -75,6 +75,17 @@ namespace acsdk
         return it != _byHash.end() && !Expired(*it->second, now);
     }
 
+    void SessionManager::Touch(uint64_t sessionId, Clock::time_point now)
+    {
+        std::shared_lock lock(_mutex);
+        auto h = _hashById.find(sessionId);
+        if (h == _hashById.end())
+            return;
+        Session& s = *_byHash.at(h->second);
+        if (!Expired(s, now))
+            s.lastUsed.store(now.time_since_epoch().count(), std::memory_order_relaxed);
+    }
+
     std::optional<SessionManager::Clock::time_point> SessionManager::ExpiresAt(uint64_t sessionId) const
     {
         std::shared_lock lock(_mutex);

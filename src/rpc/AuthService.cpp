@@ -29,6 +29,20 @@ namespace acsdk
             return colon == std::string::npos || colon < 5 ? peer : peer.substr(0, colon);
         }
 
+        // keys = { "user:<NAME>", "peer:<address>" }.
+        std::chrono::milliseconds RetryAfter(std::vector<std::string> const& keys)
+        {
+            auto now = LoginThrottle::Clock::now();
+            return std::max(sAcsdk.UserThrottle().RetryAfter({ keys[0] }, now), sAcsdk.PeerThrottle().RetryAfter({ keys[1] }, now));
+        }
+
+        void RecordFailure(std::vector<std::string> const& keys)
+        {
+            auto now = LoginThrottle::Clock::now();
+            sAcsdk.UserThrottle().Failure({ keys[0] }, now);
+            sAcsdk.PeerThrottle().Failure({ keys[1] }, now);
+        }
+
         struct Credentials
         {
             std::string username;
@@ -96,14 +110,14 @@ namespace acsdk
                         (void)VerifyPassword(credentials.username, credentials.password, DummyBytes(), DummyBytes());
                     if (!ok)
                     {
-                        sAcsdk.Throttle().Failure(throttleKeys, LoginThrottle::Clock::now());
+                        RecordFailure(throttleKeys);
                         sAcsdk.GetStats().rpcsUnauthenticated.fetch_add(1, std::memory_order_relaxed);
                         LOG_INFO("module", "mod-acsdk: failed SDK login for '{}' from {}.", credentials.username, peer);
                         call->Finish(grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "invalid username or password"));
                         return;
                     }
 
-                    sAcsdk.Throttle().Success(throttleKeys.front());
+                    sAcsdk.UserThrottle().Success(throttleKeys.front());
                     Config const& config = sAcsdk.GetConfig();
                     if (std::string refusal = AccountRefusal(*row, config); !refusal.empty())
                     {
@@ -144,10 +158,10 @@ namespace acsdk
                     return reactor;
                 }
 
-                // In-memory backoff per username and per peer address; nothing is written to the auth DB.
+                // In-memory backoff per username (strict) and per peer address (generous); nothing is written to the auth DB.
                 std::string peer = PeerAddress(ctx);
                 std::vector<std::string> keys{ "user:" + credentials.username, "peer:" + peer };
-                if (auto wait = sAcsdk.Throttle().RetryAfter(keys, LoginThrottle::Clock::now()); wait.count() > 0)
+                if (auto wait = RetryAfter(keys); wait.count() > 0)
                 {
                     sAcsdk.GetStats().rpcsUnauthenticated.fetch_add(1, std::memory_order_relaxed);
                     reactor->Finish(grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,

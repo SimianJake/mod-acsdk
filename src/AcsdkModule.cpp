@@ -104,6 +104,9 @@ namespace acsdk
         auto const now = std::chrono::steady_clock::now();
         if (now >= _nextSessionSweep)
         {
+            // A client that only listens to events is still using its session.
+            for (uint64_t sessionId : _events.StreamSessions())
+                _sessions->Touch(sessionId, now);
             _sessions->Expire(now);
             _nextSessionSweep = now + std::chrono::seconds(1);
         }

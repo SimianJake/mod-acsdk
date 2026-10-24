@@ -1,0 +1,142 @@
+#
+# mod-acsdk configuration (PLAN.md §8)
+#
+# Copy to mod_acsdk.conf next to worldserver.conf (configs/modules/) and set ACSDK.AuthToken.
+#
+
+[worldserver]
+
+#
+#    ACSDK.Enable
+#        Description: Enable the SDK gRPC listener.
+#        Default:     1
+#
+
+ACSDK.Enable = 1
+
+#
+#    ACSDK.BindAddress / ACSDK.Port
+#        Description: Listen address for the gRPC server. Keep it on localhost.
+#        Default:     "127.0.0.1" / 50051
+#
+
+ACSDK.BindAddress = "127.0.0.1"
+ACSDK.Port = 50051
+
+#
+#    ACSDK.AuthToken
+#        Description: Shared secret controllers send as "authorization: Bearer <token>".
+#                     The gRPC listener refuses to start while this is empty.
+#        Default:     ""
+#
+
+ACSDK.AuthToken = ""
+
+#
+#    ACSDK.MaxCommandsPerTick / ACSDK.MaxTickBudgetMs
+#        Description: Upper bounds on SDK work done on the world thread per tick. Excess stays
+#                     queued for the next tick.
+#        Default:     200 / 5
+#
+
+ACSDK.MaxCommandsPerTick = 200
+ACSDK.MaxTickBudgetMs = 5
+
+#
+#    ACSDK.CommandQueueSize
+#        Description: Maximum queued world-thread commands. When full, new RPCs fail with
+#                     RESOURCE_EXHAUSTED.
+#        Default:     4096
+#
+
+ACSDK.CommandQueueSize = 4096
+
+#
+#    ACSDK.HeadlessAccountPrefix
+#        Description: Only characters on accounts whose username starts with this prefix
+#                     (case-insensitive) may be listed or driven headless. Empty = none.
+#        Default:     "acsdkhc"
+#
+
+ACSDK.HeadlessAccountPrefix = "acsdkhc"
+
+#
+#    ACSDK.MaxListResults
+#        Description: Cap on characters returned by CharacterService.List.
+#        Default:     1000
+#
+
+ACSDK.MaxListResults = 1000
+
+#
+#    ACSDK.MaxHeadlessCharacters
+#        Description: Maximum characters logged in headless at once.
+#        Default:     50
+#
+
+ACSDK.MaxHeadlessCharacters = 50
+
+#
+#    ACSDK.Reflex.TeleportAck
+#        Description: Automatically send the far/near teleport acknowledgements a client would,
+#                     so a teleported headless character is not stuck (PLAN.md §5.2).
+#        Default:     1
+#
+
+ACSDK.Reflex.TeleportAck = 1
+
+#
+#    ACSDK.PacketSinkSize
+#        Description: Captured server packets kept per headless character (oldest dropped first).
+#        Default:     256
+#
+
+ACSDK.PacketSinkSize = 256
+
+#
+#    ACSDK.Debug.Enable
+#        Description: Serve the dev-only DebugService (creates test accounts and characters).
+#                     Development only.
+#        Default:     0
+#
+
+ACSDK.Debug.Enable = 0
+
+#
+#    ACSDK.Reflex.Knockback
+#        Description: Move a knocked-back headless character server-side with AzerothCore's own
+#                     knockback (a client would simulate the arc itself).
+#        Default:     1
+#
+
+ACSDK.Reflex.Knockback = 1
+
+#
+#    ACSDK.EventQueueSize
+#        Description: Events buffered per Subscribe stream. A slow subscriber loses the oldest events
+#                     and is sent Lagged{dropped=N}; the world thread never waits for it.
+#        Default:     4096
+#
+
+ACSDK.EventQueueSize = 4096
+
+#
+#    ACSDK.Prompt.TimeoutSec
+#        Description: Unanswered prompts (group invite, trade, duel, resurrect, summon, loot roll,
+#                     ready check) are declined / passed after this many seconds.
+#        Default:     60
+#
+
+ACSDK.Prompt.TimeoutSec = 60
+
+#
+#    ACSDK.RawPackets.Enable / .Allow / .PerSecond
+#        Description: Escape hatch (PLAN.md §4.6.4): ActionService.SendClientPacket and RAW_PACKET events.
+#                     Allow = comma-separated client opcodes (e.g. 0x06E); empty = any handled opcode
+#                     except the fixed login/character-management denylist. PerSecond = per character.
+#        Default:     0 / "" / 20
+#
+
+ACSDK.RawPackets.Enable = 0
+ACSDK.RawPackets.Allow = ""
+ACSDK.RawPackets.PerSecond = 20

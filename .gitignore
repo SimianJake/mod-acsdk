@@ -1,0 +1,8 @@
+# Build output and local config (live .conf files hold ACSDK.AuthToken)
+build/
+out/
+vcpkg_installed/
+.vs/
+*.user
+*.conf
+!*.conf.dist

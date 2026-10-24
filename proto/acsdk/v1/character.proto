@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+import "acsdk/v1/common.proto";
+
+// Characters that may be driven headless (PLAN.md §7). Leases are in lease.proto.
+service CharacterService {
+  rpc List(ListCharactersRequest) returns (ListCharactersResponse);
+  // Resolves when the character is in the world (or failed). No-op if it is already headless-online.
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // Live state read from AzerothCore objects on the world thread (PLAN.md §4.7). No token needed:
+  // any controller may observe. Only the requested sections are filled in.
+  rpc GetState(GetStateRequest) returns (CharacterState);
+}
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  OFFLINE = 1;
+  LOGGING_IN = 2;
+  ONLINE = 3;
+  LOGGING_OUT = 4;
+}
+
+message ListCharactersRequest {}
+
+message CharacterSummary {
+  uint64 character_guid = 1;
+  string name = 2;
+  uint32 account_id = 3;
+  string account_name = 4;
+  uint32 race = 5;            // ChrRaces.dbc id
+  uint32 class_id = 6;        // ChrClasses.dbc id
+  uint32 level = 7;
+  bool online = 8;            // characters.online: in the world via any session (headless or client)
+  LifecycleState state = 9;   // headless lifecycle; OFFLINE when not driven by mod-acsdk
+}
+
+// Characters on eligible accounts (ACSDK.HeadlessAccountPrefix), ordered by account then name.
+message ListCharactersResponse {
+  repeated CharacterSummary characters = 1;
+  bool truncated = 2;         // more than ACSDK.MaxListResults matched
+}
+
+message LoginRequest {
+  string name = 1;
+}
+
+message LoginResponse {
+  bool ok = 1;
+  string reason = 2;          // on failure: CHARACTER_NOT_FOUND, ACCOUNT_ALREADY_ONLINE, ACCOUNT_NOT_ELIGIBLE, ...
+  uint64 character_guid = 3;
+  string name = 4;
+  LifecycleState state = 5;
+}
+
+message LogoutRequest {
+  uint64 character_guid = 1;
+  string lease_token = 2;     // required when the character is leased
+}
+
+message LogoutResponse {
+  bool ok = 1;
+  string reason = 2;
+}
+
+enum StateSection {
+  STATE_SECTION_UNSPECIFIED = 0;
+  IDENTITY = 1;               // race, class, level, gender
+  POSITION = 2;               // map, zone, area, coordinates, moving
+  VITALS = 3;                 // health and power
+  STATUS = 4;                 // dead, ghost, in combat, teleporting
+  TARGET = 5;                 // selected target
+  MONEY = 6;
+  SPELLS = 7;                 // known (spellbook) spell ids
+  GROUP = 8;                  // party/raid membership
+  CORPSE = 9;                 // where the corpse is and when it can be reclaimed
+  EQUIPMENT = 10;             // equipped items
+  INVENTORY = 11;             // items in the backpack and bags, free slots
+  QUESTS = 12;                // quest log with objective progress
+}
+
+message InventoryItem {
+  uint64 item_guid = 1;       // full object guid (for SellItem / EquipItem)
+  uint32 item_id = 2;
+  string name = 3;
+  uint32 count = 4;
+  uint32 bag = 5;             // 255 = equipped or backpack; otherwise the bag's slot (19-22)
+  uint32 slot = 6;            // equipped: 0 head ... 18 tabard; bags 19-22; backpack 23-38; inside a bag 0-35
+  uint32 durability = 7;
+  uint32 max_durability = 8;
+  uint32 quality = 9;         // 0 poor, 1 common, 2 uncommon, 3 rare, 4 epic
+  uint32 item_level = 10;
+  uint32 required_level = 11;
+  uint32 inventory_type = 12; // InventoryType (where it can be equipped; 0 = not equippable)
+  uint32 sell_price_copper = 13;
+}
+
+message QuestObjective {
+  string kind = 1;            // CREATURE, GAMEOBJECT or ITEM
+  uint32 id = 2;              // creature / gameobject / item entry
+  string name = 3;
+  uint32 current = 4;
+  uint32 required = 5;
+}
+
+message QuestLogEntry {
+  uint32 quest_id = 1;
+  string title = 2;
+  string status = 3;          // INCOMPLETE, COMPLETE (ready to turn in) or FAILED
+  int32 level = 4;
+  repeated QuestObjective objectives = 5;
+}
+
+message GetStateRequest {
+  uint64 character_guid = 1;
+  repeated StateSection sections = 2;  // empty = all sections
+}
+
+message CharacterState {
+  uint64 character_guid = 1;
+  string name = 2;
+  LifecycleState state = 3;
+  string lease_holder = 4;    // holder label, empty when unleased; never the token
+  bool in_world = 5;          // false when not headless-online; other fields are then unset
+
+  // IDENTITY
+  uint32 race = 10;
+  uint32 class_id = 11;
+  uint32 level = 12;
+  uint32 gender = 13;
+
+  // POSITION
+  uint32 map_id = 20;
+  uint32 zone_id = 21;
+  uint32 area_id = 22;
+  Vector3 position = 23;
+  float orientation = 24;
+  bool moving = 25;           // a server-side movement spline is active
+
+  // VITALS
+  uint32 health = 30;
+  uint32 max_health = 31;
+  uint32 power_type = 32;     // Powers enum (0 mana, 1 rage, 3 energy, 6 runic power)
+  uint32 power = 33;
+  uint32 max_power = 34;
+
+  // STATUS
+  bool dead = 40;
+  bool ghost = 41;
+  bool in_combat = 42;
+  bool teleporting = 43;
+
+  // TARGET
+  uint64 target_guid = 50;    // full 64-bit object guid
+
+  // MONEY
+  uint32 money_copper = 60;
+
+  // SPELLS
+  repeated uint32 known_spells = 70;
+
+  // GROUP
+  bool in_group = 80;
+  uint64 group_leader_guid = 81;
+  repeated uint64 group_member_guids = 82;
+
+  // CORPSE
+  bool has_corpse = 90;
+  uint32 corpse_map_id = 91;
+  Vector3 corpse_position = 92;
+  uint32 corpse_reclaim_in_s = 93;  // seconds until ReclaimCorpse is allowed; 0 = now
+
+  // EQUIPMENT
+  repeated InventoryItem equipment = 100;
+
+  // INVENTORY (backpack, bags and the bags themselves)
+  repeated InventoryItem inventory = 110;
+  uint32 free_bag_slots = 111;
+
+  // QUESTS
+  repeated QuestLogEntry quests = 120;
+}

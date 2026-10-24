@@ -1,0 +1,25 @@
+{
+  "name": "acsdk-server-deps",
+  "version-string": "0.0.0",
+  "description": "Native deps for building AzerothCore + mod-acsdk on Windows. Use triplet x64-windows-static-md (static libs, dynamic CRT /MD) so Boost, OpenSSL and gRPC share one CRT and one OpenSSL, and no extra DLLs ship next to worldserver.exe.",
+  "builtin-baseline": "788afd74ebab48bcb0993e68ee7c98d86cd59cae",
+  "dependencies": [
+    "boost-algorithm",
+    "boost-asio",
+    "boost-container",
+    "boost-dll",
+    "boost-filesystem",
+    "boost-heap",
+    "boost-iostreams",
+    "boost-lexical-cast",
+    "boost-process",
+    "boost-program-options",
+    "boost-regex",
+    "boost-stacktrace",
+    "boost-system",
+    "boost-thread",
+    "openssl",
+    "grpc",
+    "protobuf"
+  ]
+}

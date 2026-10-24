@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+// Server-level information and diagnostics (PLAN.md §7).
+service ServerService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool serving = 1;
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  uint32 api_version = 1;       // major version of the acsdk API (1 for acsdk.v1)
+  string sdk_version = 2;       // mod-acsdk build version
+  string core_revision = 3;     // AzerothCore revision string
+  string realm_name = 4;
+  uint64 uptime_ms = 5;         // since the gRPC listener started
+  uint64 world_ticks = 6;       // WorldScript::OnUpdate calls seen
+  uint32 last_tick_diff_ms = 7; // diff passed to the most recent OnUpdate
+}
+
+message GetStatsRequest {}
+
+// Simple diagnostic counters (PLAN.md §4.5). Counters are cumulative since the listener started.
+message GetStatsResponse {
+  uint64 rpcs_total = 1;
+  uint64 rpcs_unauthenticated = 2;
+  uint64 commands_enqueued = 3;            // world-thread tasks queued by RPCs
+  uint64 commands_executed = 4;
+  uint64 commands_rejected_queue_full = 5; // RPCs failed with RESOURCE_EXHAUSTED
+  uint32 command_queue_depth = 6;          // tasks waiting right now
+  uint32 last_tick_commands = 7;           // tasks run in the most recent tick
+  uint32 last_tick_dispatch_us = 8;        // time spent dispatching in the most recent tick
+  uint32 max_tick_dispatch_us = 9;
+  uint64 events_published = 10;
+  uint64 events_dropped = 11;              // lost to full subscriber queues (each loss is reported as Lagged)
+  uint32 event_subscribers = 12;
+}

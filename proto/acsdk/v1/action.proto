@@ -1,0 +1,292 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+import "acsdk/v1/common.proto";
+
+// Character actions (PLAN.md §4.2, §4.6). Every request carries the character's lease token.
+// Player actions are performed by injecting the client's own CMSG packets, so AzerothCore's handlers
+// apply every game rule; results come from the server's SMSG replies. Movement and facing use
+// AzerothCore's server-side MotionMaster/PathGenerator (whitelisted, §4.6.3).
+//
+// Commands run on per-character channels (docs/research/opcode-map.md §5): move, cast, melee, chat, interact.
+// A new command on a channel supersedes the running one (old -> CANCELLED). wait=true returns the
+// terminal result; wait=false returns STARTED with a command_id for WaitCommand / Cancel.
+service ActionService {
+  rpc MoveTo(MoveToRequest) returns (CommandResult);
+  rpc Stop(StopRequest) returns (CommandResult);
+  rpc Follow(FollowRequest) returns (CommandResult);
+  rpc Face(FaceRequest) returns (CommandResult);
+  rpc SetTarget(SetTargetRequest) returns (CommandResult);
+  rpc Attack(AttackRequest) returns (CommandResult);
+  rpc StopAttack(StopAttackRequest) returns (CommandResult);
+  rpc CastSpell(CastSpellRequest) returns (CommandResult);
+  rpc CancelCast(CancelCastRequest) returns (CommandResult);
+  rpc Say(SayRequest) returns (CommandResult);
+  rpc Whisper(WhisperRequest) returns (CommandResult);
+  rpc Cancel(CancelRequest) returns (CommandResult);
+  // Wait for a command started with wait=false (any controller may wait on any command id).
+  rpc WaitCommand(WaitCommandRequest) returns (CommandResult);
+  // Escape hatch (PLAN.md §4.6.4): send a client opcode with no typed primitive yet. Off unless
+  // ACSDK.RawPackets.Enable = 1; restricted to client opcodes AzerothCore handles, an optional allowlist
+  // (ACSDK.RawPackets.Allow), a fixed denylist (login/character management) and a per-character rate limit.
+  // Still subject to AzerothCore's handlers and session-status rules. COMPLETED = handed to the handler.
+  rpc SendClientPacket(SendClientPacketRequest) returns (CommandResult);
+
+  // ---- Interaction channel: death recovery, NPCs, quests, vendors, loot, equipment ----
+  // One interaction at a time per character; a new one supersedes the running one. The character must
+  // be within interaction range (about 5 yards) of the NPC or corpse, as for a real client.
+  // Interactions that open a window (Talk, SelectGossipOption, OpenVendor, Loot) return what the window
+  // showed in CommandResult.interaction. Silent refusals time out with a diagnosed reason
+  // (TOO_FAR, TARGET_GONE, NOT_DEAD, NOT_RELEASED, NO_CORPSE, RECLAIM_DELAY, ...).
+
+  // CMSG_REPOP_REQUEST: release spirit (dead -> ghost at the graveyard). COMPLETED when a ghost.
+  rpc ReleaseSpirit(InteractRequest) returns (CommandResult);
+  // CMSG_RECLAIM_CORPSE: resurrect at the corpse (ghost, within 39 yd, after the reclaim delay).
+  rpc ReclaimCorpse(InteractRequest) returns (CommandResult);
+  // CMSG_SPIRIT_HEALER_ACTIVATE: resurrect at a spirit healer (npc_guid), with resurrection sickness.
+  rpc SpiritHealerResurrect(InteractRequest) returns (CommandResult);
+  // Right-click an NPC: CMSG_GOSSIP_HELLO, CMSG_QUESTGIVER_HELLO or CMSG_LIST_INVENTORY by its npc flags.
+  // interaction.kind says what opened: GOSSIP, QUEST_LIST, QUEST_DETAILS, QUEST_REQUEST_ITEMS,
+  // QUEST_REWARD, VENDOR, TRAINER, TAXI, BANK, BINDER or CLOSED.
+  rpc Talk(InteractRequest) returns (CommandResult);
+  // CMSG_GOSSIP_SELECT_OPTION on the open gossip menu; returns what opened next (as Talk).
+  rpc SelectGossipOption(GossipOptionRequest) returns (CommandResult);
+  // CMSG_QUESTGIVER_ACCEPT_QUEST. COMPLETED when the quest is in the quest log.
+  rpc AcceptQuest(QuestRequest) returns (CommandResult);
+  // Turn in: CMSG_QUESTGIVER_COMPLETE_QUEST, then (as the client) REQUEST_REWARD and CHOOSE_REWARD with
+  // reward_index. COMPLETED when rewarded; QUEST_NOT_COMPLETE if the objectives are not done.
+  rpc CompleteQuest(QuestRequest) returns (CommandResult);
+  // CMSG_QUESTLOG_REMOVE_QUEST. COMPLETED when the quest left the log. npc_guid is not needed.
+  rpc AbandonQuest(QuestRequest) returns (CommandResult);
+  // CMSG_LIST_INVENTORY: the vendor's items in interaction.vendor_items.
+  rpc OpenVendor(InteractRequest) returns (CommandResult);
+  // CMSG_BUY_ITEM. Fails with the game's BUY_ERR_* / EQUIP_ERR_* reason.
+  rpc BuyItem(BuyItemRequest) returns (CommandResult);
+  // CMSG_SELL_ITEM. COMPLETED when the item left the bags; fails with SELL_ERR_*.
+  rpc SellItem(SellItemRequest) returns (CommandResult);
+  // CMSG_AUTOEQUIP_ITEM for the item wherever it is in the bags. COMPLETED when equipped; fails with EQUIP_ERR_*.
+  rpc EquipItem(EquipItemRequest) returns (CommandResult);
+  // CMSG_LOOT on a corpse, take the money and every lootable item, then CMSG_LOOT_RELEASE.
+  // interaction.loot lists each item and whether it was taken. Fails with LOOT_ERROR_* (e.g. LOOT_ERROR_TOO_FAR),
+  // or with EQUIP_ERR_* when an item did not fit (the rest is still taken).
+  rpc Loot(LootRequest) returns (CommandResult);
+}
+
+message InteractRequest {
+  CharacterRef character = 1;
+  uint64 npc_guid = 2;        // Talk, OpenVendor, SpiritHealerResurrect
+  uint32 timeout_ms = 3;      // default 5000
+  bool wait = 4;
+}
+
+message GossipOptionRequest {
+  CharacterRef character = 1;
+  uint64 npc_guid = 2;
+  uint32 menu_id = 3;         // interaction.menu_id from Talk
+  uint32 option_index = 4;    // GossipOption.index
+  string code = 5;            // for coded (password) options
+  uint32 timeout_ms = 6;
+  bool wait = 7;
+}
+
+message QuestRequest {
+  CharacterRef character = 1;
+  uint64 npc_guid = 2;
+  uint32 quest_id = 3;
+  uint32 reward_index = 4;    // CompleteQuest: which choice reward (0-based) when the quest offers a choice
+  uint32 timeout_ms = 5;
+  bool wait = 6;
+}
+
+message BuyItemRequest {
+  CharacterRef character = 1;
+  uint64 npc_guid = 2;
+  uint32 item_id = 3;
+  uint32 count = 4;           // default 1
+  uint32 timeout_ms = 5;
+  bool wait = 6;
+}
+
+message SellItemRequest {
+  CharacterRef character = 1;
+  uint64 npc_guid = 2;
+  uint64 item_guid = 3;       // InventoryItem.item_guid
+  uint32 count = 4;           // 0 = the whole stack
+  uint32 timeout_ms = 5;
+  bool wait = 6;
+}
+
+message EquipItemRequest {
+  CharacterRef character = 1;
+  uint64 item_guid = 2;       // InventoryItem.item_guid
+  uint32 timeout_ms = 3;
+  bool wait = 4;
+}
+
+message LootRequest {
+  CharacterRef character = 1;
+  uint64 target_guid = 2;     // a dead creature
+  uint32 timeout_ms = 3;
+  bool wait = 4;
+}
+
+message GossipOption {
+  uint32 index = 1;
+  uint32 icon = 2;            // GossipOptionIcon: 0 chat, 1 vendor, 2 taxi, 3 trainer, 5 binder, 6 bank ...
+  bool coded = 3;
+  uint32 box_money = 4;
+  string text = 5;
+}
+
+message QuestOffer {
+  uint32 quest_id = 1;
+  uint32 icon = 2;            // dialog status icon (available, ready to turn in, ...)
+  int32 level = 3;
+  string title = 4;
+}
+
+message VendorItem {
+  uint32 slot = 1;
+  uint32 item_id = 2;
+  string name = 3;
+  int32 available = 4;        // -1 = unlimited
+  uint32 price_copper = 5;
+  uint32 buy_count = 6;
+  uint32 extended_cost = 7;
+}
+
+message LootedItem {
+  uint32 slot = 1;
+  uint32 item_id = 2;
+  string name = 3;
+  uint32 count = 4;
+  bool taken = 5;             // false: not allowed (roll, locked) or did not fit
+}
+
+message Interaction {
+  string kind = 1;
+  uint64 npc_guid = 2;
+  uint32 menu_id = 3;
+  repeated GossipOption options = 4;
+  repeated QuestOffer quests = 5;       // QUEST_LIST / GOSSIP; the QUEST_* kinds hold the one quest
+  repeated VendorItem vendor_items = 6;
+  uint32 loot_money = 7;
+  repeated LootedItem loot = 8;
+}
+
+message SendClientPacketRequest {
+  CharacterRef character = 1;
+  uint32 opcode = 2;
+  bytes payload = 3;
+}
+
+message CharacterRef {
+  uint64 character_guid = 1;
+  string lease_token = 2;     // from LeaseService.ClaimCharacter; required on every command
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  STARTED = 1;
+  COMPLETED = 2;
+  FAILED = 3;
+  TIMEOUT = 4;
+  CANCELLED = 5;
+}
+
+message CommandResult {
+  uint64 command_id = 1;
+  CommandStatus status = 2;
+  // Why it failed/was cancelled, from AzerothCore's own answers where possible:
+  // SpellCastResult names (SPELL_FAILED_OUT_OF_RANGE), NO_PATH, STUCK, NOT_IN_RANGE, BAD_FACING,
+  // TARGET_DEAD, TARGET_GONE, PLAYER_NOT_FOUND, NO_RESPONSE, SUPERSEDED, LEASE_LOST, INVALID_LEASE_TOKEN...
+  string reason = 3;
+  uint32 spell_id = 4;        // CastSpell: the spell id AzerothCore actually cast (rank selection may differ)
+  Interaction interaction = 5; // Talk / SelectGossipOption / OpenVendor / Loot: what the window showed
+}
+
+message MoveToRequest {
+  CharacterRef character = 1;
+  Vector3 target = 2;         // same map as the character
+  float tolerance = 3;        // yards; default 1.0
+  uint32 timeout_ms = 4;      // default 30000
+  bool wait = 5;
+}
+
+message StopRequest {
+  CharacterRef character = 1;
+}
+
+message FollowRequest {
+  CharacterRef character = 1;
+  uint64 target_guid = 2;     // full object guid
+  float distance = 3;         // default 2.0
+  float angle = 4;            // radians relative to the target's facing; default 0 (behind is pi)
+  bool wait = 5;              // Follow never completes on its own; wait=true returns when it ends
+}
+
+message FaceRequest {
+  CharacterRef character = 1;
+  oneof what {
+    uint64 target_guid = 2;
+    float orientation = 3;    // radians
+  }
+  bool wait = 4;
+}
+
+message SetTargetRequest {
+  CharacterRef character = 1;
+  uint64 target_guid = 2;     // 0 clears
+}
+
+message AttackRequest {
+  CharacterRef character = 1;
+  uint64 target_guid = 2;
+  bool until_stopped = 3;     // false: COMPLETED when the target dies
+  uint32 timeout_ms = 4;      // default 120000
+  bool wait = 5;
+}
+
+message StopAttackRequest {
+  CharacterRef character = 1;
+}
+
+message CastSpellRequest {
+  CharacterRef character = 1;
+  uint32 spell_id = 2;        // ids only; names are resolved by the Python SDK (decision D3)
+  oneof target {
+    uint64 target_guid = 3;   // unit target
+    Vector3 destination = 4;  // ground-targeted spells
+  }                           // neither: self / current selection, as the client would
+  uint32 timeout_ms = 5;      // default 30000 (no reply at all -> TIMEOUT / NO_RESPONSE)
+  bool wait = 6;
+}
+
+message CancelCastRequest {
+  CharacterRef character = 1;
+  uint32 spell_id = 2;        // 0 = whatever is being cast
+}
+
+message SayRequest {
+  CharacterRef character = 1;
+  string text = 2;
+  bool wait = 3;
+}
+
+message WhisperRequest {
+  CharacterRef character = 1;
+  string to = 2;              // character name
+  string text = 3;
+  bool wait = 4;
+}
+
+message CancelRequest {
+  CharacterRef character = 1;
+  uint64 command_id = 2;
+}
+
+message WaitCommandRequest {
+  uint64 command_id = 1;
+  uint32 timeout_ms = 2;      // how long this call waits (the command keeps its own timeout); default 30000
+}

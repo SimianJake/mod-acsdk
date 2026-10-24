@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+// Development-only helpers, served only when ACSDK.Debug.Enable = 1. Not part of the stable API.
+//
+// Test provisioning only: PLAN.md §5.1 keeps account and character creation outside the SDK proper.
+// (The Phase 0 Spike B MovePoint/Say/GetPosition/TakeChat helpers were replaced by ActionService and
+// CharacterService.GetState in Phase 3.)
+service DebugService {
+  // AccountMgr::CreateAccount; the username must match ACSDK.HeadlessAccountPrefix.
+  rpc CreateAccount(CreateAccountRequest) returns (DebugResult);
+  // Injects CMSG_CHAR_CREATE through a temporary socketless session, so AzerothCore's own
+  // HandleCharCreateOpcode validates and creates the character.
+  rpc CreateCharacter(CreateCharacterRequest) returns (CreateCharacterResponse);
+}
+
+message DebugResult {
+  bool ok = 1;
+  string reason = 2;
+}
+
+message CreateAccountRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message CreateCharacterRequest {
+  string account_username = 1;
+  string name = 2;
+  uint32 race = 3;            // e.g. 1 = Human
+  uint32 class_id = 4;        // e.g. 1 = Warrior, 8 = Mage
+  uint32 gender = 5;          // 0 = male, 1 = female
+}
+
+message CreateCharacterResponse {
+  bool ok = 1;
+  string reason = 2;          // NAME_IN_USE, ACCOUNT_*, or AzerothCore's ResponseCodes name (e.g. CHAR_NAME_INVALID_CHARACTER)
+  uint64 character_guid = 3;
+  string name = 4;            // the name as stored (AzerothCore capitalises it: "examplepaladin" -> "Examplepaladin")
+}

@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+import "acsdk/v1/common.proto";
+
+// World queries (PLAN.md §7, Phase 5). Read-only (whitelisted reads, §4.6.3), built on the world thread
+// from AzerothCore state. Map queries are answered for the map and phase of a headless character
+// (`character_guid`); no lease is needed.
+service WorldService {
+  rpc NearbyObjects(NearbyObjectsRequest) returns (NearbyObjectsResponse);
+  rpc GetSpellInfo(GetSpellInfoRequest) returns (GetSpellInfoResponse);
+  // Server-side pathfinding over the mmaps navmesh (PathGenerator). One query covers at most ~296 yards
+  // (AzerothCore's MAX_PATH_LENGTH); longer routes come back INCOMPLETE and are chained client-side.
+  rpc FindPath(FindPathRequest) returns (FindPathResponse);
+  rpc GetHeight(GetHeightRequest) returns (GetHeightResponse);
+  rpc LineOfSight(LineOfSightRequest) returns (LineOfSightResponse);
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc GetItemInfo(GetItemInfoRequest) returns (GetItemInfoResponse);
+  rpc GetCreatureInfo(GetCreatureInfoRequest) returns (GetCreatureInfoResponse);
+}
+
+message FindPathRequest {
+  uint64 character_guid = 1;  // map/phase; also the start when `start` is unset
+  Vector3 start = 2;          // optional
+  Vector3 end = 3;
+  bool straight = 4;          // straight (corner) path instead of smoothed 4-yard steps
+}
+
+// PathType bit flags (PathGenerator.h).
+enum PathFlags {
+  PATH_BLANK = 0;
+  PATH_NORMAL = 1;
+  PATH_SHORTCUT = 2;          // goes through obstacles (no mmaps there)
+  PATH_INCOMPLETE = 4;        // partial path getting closer to the target
+  PATH_NOPATH = 8;
+  PATH_NOT_USING_PATH = 16;   // flying/swimming or a map without mmaps
+  PATH_SHORT = 32;            // hit the path length limit
+  PATH_FARFROMPOLY_START = 64;
+  PATH_FARFROMPOLY_END = 128;
+}
+
+message FindPathResponse {
+  repeated Vector3 points = 1;
+  uint32 path_flags = 2;      // PathFlags bits
+  float length = 3;           // yards along the points
+  Vector3 actual_end = 4;     // where the path really ends (navmesh-snapped)
+  bool reachable = 5;         // NORMAL with no INCOMPLETE/NOPATH/SHORT: the end can be walked to
+}
+
+message GetHeightRequest {
+  uint64 character_guid = 1;
+  float x = 2;
+  float y = 3;
+  float z = 4;                // search starts here and goes down (use a value above the ground)
+  bool include_vmaps = 5;     // also hit buildings/objects (vmaps), not only terrain
+}
+
+message GetHeightResponse {
+  bool found = 1;
+  float height = 2;
+  float water_level = 3;      // -500000 when there is no water
+}
+
+message LineOfSightRequest {
+  uint64 character_guid = 1;
+  Vector3 from = 2;
+  Vector3 to = 3;
+}
+
+message LineOfSightResponse {
+  bool clear = 1;             // AzerothCore's own LoS check (vmaps + game objects), as spells use
+}
+
+message GetObjectRequest {
+  uint64 character_guid = 1;  // looked up on this character's map
+  uint64 guid = 2;
+}
+
+message GetObjectResponse {
+  bool found = 1;
+  WorldObject object = 2;
+  bool in_line_of_sight = 3;  // from the character
+}
+
+message GetItemInfoRequest { repeated uint32 item_ids = 1; }
+
+message ItemInfo {
+  uint32 id = 1;
+  string name = 2;
+  uint32 quality = 3;
+  uint32 item_level = 4;
+  uint32 required_level = 5;
+  uint32 item_class = 6;
+  uint32 item_subclass = 7;
+  uint32 inventory_type = 8;
+  uint32 sell_price = 9;
+}
+
+message GetItemInfoResponse { repeated ItemInfo items = 1; }
+
+message GetCreatureInfoRequest { repeated uint32 entries = 1; }
+
+message CreatureInfo {
+  uint32 entry = 1;
+  string name = 2;
+  string subname = 3;
+  uint32 min_level = 4;
+  uint32 max_level = 5;
+  uint32 faction = 6;
+  uint32 rank = 7;            // 0 normal, 1 elite, 2 rare elite, 3 boss, 4 rare
+  uint32 creature_type = 8;   // CreatureType
+}
+
+message GetCreatureInfoResponse { repeated CreatureInfo creatures = 1; }
+
+enum ObjectKind {
+  OBJECT_KIND_UNSPECIFIED = 0;
+  CREATURE = 1;
+  PLAYER = 2;
+  GAMEOBJECT = 3;             // GetObject only
+}
+
+message NearbyObjectsRequest {
+  uint64 character_guid = 1;  // centre of the search (any headless character; no lease needed)
+  float radius = 2;           // yards, capped at 100
+  ObjectKind kind = 3;        // UNSPECIFIED = creatures and players
+  bool alive_only = 4;
+  bool hostile_only = 5;      // hostile to the centre character
+  uint32 limit = 6;           // default 50, capped at 200; nearest first
+}
+
+message WorldObject {
+  uint64 guid = 1;            // full object guid (use as target_guid)
+  ObjectKind kind = 2;
+  uint32 entry = 3;           // creature template id (0 for players)
+  string name = 4;
+  uint32 level = 5;
+  Vector3 position = 6;
+  float orientation = 7;
+  float distance = 8;         // from the centre character
+  bool alive = 9;
+  bool hostile = 10;
+  bool attackable = 11;       // IsValidAttackTarget from the centre character
+  uint32 health = 12;
+  uint32 max_health = 13;
+}
+
+message NearbyObjectsResponse {
+  repeated WorldObject objects = 1;
+}
+
+message GetSpellInfoRequest {
+  repeated uint32 spell_ids = 1;  // up to 1000
+}
+
+message SpellInfo {
+  uint32 id = 1;
+  string name = 2;
+  string rank = 3;            // e.g. "Rank 1"
+  uint32 cast_time_ms = 4;
+  bool channeled = 5;
+  bool passive = 6;
+  float max_range = 7;
+  uint32 power_type = 8;
+  uint32 power_cost = 9;
+  uint32 recovery_ms = 10;    // cooldown
+}
+
+message GetSpellInfoResponse {
+  repeated SpellInfo spells = 1;  // unknown ids are omitted
+}

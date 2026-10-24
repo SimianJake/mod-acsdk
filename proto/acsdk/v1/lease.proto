@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+// Controller ownership of characters (PLAN.md §4.4). Exactly one controller drives a character at a
+// time; anyone authenticated may observe. The lease token is a bearer capability: keep it secret.
+service LeaseService {
+  // The character must be headless (logging in or online). Fails with already_leased unless `force`
+  // is set and ACSDK.Lease.AllowForceTakeover = 1, which invalidates the previous holder's token.
+  rpc ClaimCharacter(ClaimCharacterRequest) returns (ClaimCharacterResponse);
+  rpc ReleaseCharacter(ReleaseCharacterRequest) returns (LeaseResult);
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+  // Holder labels and expiry only, never tokens.
+  rpc ListLeases(ListLeasesRequest) returns (ListLeasesResponse);
+}
+
+message ClaimCharacterRequest {
+  uint64 character_guid = 1;
+  bool force = 2;
+}
+
+message ClaimCharacterResponse {
+  bool ok = 1;
+  string reason = 2;          // ALREADY_LEASED, NOT_HEADLESS, TAKEOVER_DISABLED
+  string lease_token = 3;
+  uint32 ttl_ms = 4;          // renew (RenewLease) before this runs out
+  string previous_holder = 5; // label of the controller that lost the lease on a forced takeover
+}
+
+message ReleaseCharacterRequest {
+  uint64 character_guid = 1;
+  string lease_token = 2;
+}
+
+message LeaseResult {
+  bool ok = 1;
+  string reason = 2;          // INVALID_LEASE_TOKEN, NOT_LEASED
+}
+
+message RenewLeaseRequest {
+  uint64 character_guid = 1;
+  string lease_token = 2;
+}
+
+message RenewLeaseResponse {
+  bool ok = 1;
+  string reason = 2;
+  uint32 ttl_ms = 3;
+}
+
+message ListLeasesRequest {}
+
+message LeaseEntry {
+  uint64 character_guid = 1;
+  string holder_label = 2;    // x-acsdk-controller-id of the holder; a label only, grants nothing
+  uint32 expires_in_ms = 3;
+}
+
+message ListLeasesResponse {
+  repeated LeaseEntry leases = 1;
+}

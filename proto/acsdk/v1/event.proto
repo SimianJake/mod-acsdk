@@ -1,0 +1,215 @@
+syntax = "proto3";
+
+package acsdk.v1;
+
+import "acsdk/v1/character.proto";
+
+// Event streams (PLAN.md §7, §4.7). One Subscribe stream per controller carries all its filters.
+//
+// Each event type has exactly ONE official source (docs/events.md), never two, so an occurrence is
+// delivered at most once per character stream:
+//   Chat ............. SMSG_MESSAGECHAT / SMSG_GM_MESSAGECHAT
+//   DamageDealt/Taken  combat-log SMSGs: SMSG_ATTACKERSTATEUPDATE, SMSG_SPELLNONMELEEDAMAGELOG
+//                      (owner decision 2026-10-22: carries spell id and school)
+//   Death ............ UnitScript::OnUnitDeath
+//   AuraApplied ...... UnitScript::OnAuraApply      AuraRemoved ... UnitScript::OnAuraRemove
+//   SpellCastStart ... SMSG_SPELL_START, MSG_CHANNEL_START
+//   SpellCastFinish .. SMSG_SPELL_GO, SMSG_CAST_FAILED, SMSG_SPELL_FAILURE, MSG_CHANNEL_UPDATE(0)
+//   LevelUp .......... PlayerScript::OnPlayerLevelChanged
+//   Loot ............. SMSG_LOOT_RESPONSE, SMSG_ITEM_PUSH_RESULT (self), SMSG_LOOT_MONEY_NOTIFY
+//   Prompt ........... SMSG_GROUP_INVITE, SMSG_TRADE_STATUS(begin), SMSG_DUEL_REQUESTED, SMSG_RESURRECT_REQUEST,
+//                      SMSG_SUMMON_REQUEST, SMSG_LOOT_START_ROLL, MSG_RAID_READY_CHECK
+//   LeaseLost, CharacterStateChanged, CommandResult, Lagged ... SDK-internal
+//   RawPacket ........ opt-in SMSG copy (ACSDK.RawPackets.Enable)
+service EventService {
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+  // Answer a Prompt event (requires the character's lease token).
+  rpc RespondToPrompt(RespondToPromptRequest) returns (PromptResponse);
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  CHAT = 1;
+  DAMAGE_DEALT = 2;
+  DAMAGE_TAKEN = 3;
+  DEATH = 4;
+  AURA_APPLIED = 5;
+  AURA_REMOVED = 6;
+  SPELL_CAST_START = 7;
+  SPELL_CAST_FINISH = 8;
+  LEVEL_UP = 9;
+  LOOT = 10;
+  PROMPT = 11;
+  LEASE_LOST = 12;
+  CHARACTER_STATE_CHANGED = 13;
+  COMMAND_RESULT = 14;
+  RAW_PACKET = 15;
+  LAGGED = 16;               // always delivered; cannot be filtered out
+}
+
+message SubscribeRequest {
+  repeated uint64 character_guids = 1;   // empty = every headless character
+  repeated EventType types = 2;          // empty = every type except RAW_PACKET
+  repeated uint32 raw_opcodes = 3;       // RAW_PACKET only: server opcodes to copy (needs ACSDK.RawPackets.Enable)
+}
+
+message Event {
+  uint64 sequence = 1;                   // server-wide, increasing (other characters' events cause gaps); drops are reported by Lagged
+  uint64 character_guid = 2;             // whose stream this belongs to ("what this character was told")
+  uint64 server_time_ms = 3;             // since the gRPC listener started
+  oneof payload {
+    ChatEvent chat = 10;
+    DamageEvent damage_dealt = 11;
+    DamageEvent damage_taken = 12;
+    DeathEvent death = 13;
+    AuraEvent aura_applied = 14;
+    AuraEvent aura_removed = 15;
+    SpellCastEvent spell_cast_start = 16;
+    SpellCastEvent spell_cast_finish = 17;
+    LevelUpEvent level_up = 18;
+    LootEvent loot = 19;
+    PromptEvent prompt = 20;
+    LeaseLostEvent lease_lost = 21;
+    CharacterStateChangedEvent character_state_changed = 22;
+    CommandResultEvent command_result = 23;
+    RawPacketEvent raw_packet = 24;
+    LaggedEvent lagged = 25;
+  }
+}
+
+message ChatEvent {
+  uint32 chat_type = 1;       // ChatMsg (1 say, 7 whisper, 9 whisper inform, 2 party, ...)
+  uint32 language = 2;
+  uint64 sender_guid = 3;
+  string sender_name = 4;     // filled for NPC types; players: resolve via sender_guid
+  uint64 receiver_guid = 5;
+  string text = 6;
+  bool self = 7;              // sent by this character (its own echo)
+  string channel = 8;
+}
+
+message DamageEvent {
+  uint64 attacker_guid = 1;
+  uint64 victim_guid = 2;
+  uint32 amount = 3;
+  uint32 overkill = 4;
+  uint32 school_mask = 5;     // SpellSchoolMask (1 physical, 4 fire, ...)
+  uint32 spell_id = 6;        // 0 = melee swing
+  uint32 absorbed = 7;
+  uint32 resisted = 8;
+  uint32 blocked = 9;
+  bool critical = 10;
+}
+
+message DeathEvent {
+  enum Role { ROLE_UNSPECIFIED = 0; DIED = 1; KILLED = 2; }
+  Role role = 1;              // DIED: this character died; KILLED: it killed `victim_guid`
+  uint64 victim_guid = 2;
+  uint64 killer_guid = 3;
+}
+
+message AuraEvent {
+  uint64 target_guid = 1;
+  uint64 caster_guid = 2;
+  uint32 spell_id = 3;
+  uint32 stacks = 4;
+  int32 duration_ms = 5;      // -1 = permanent
+  bool is_refresh = 6;        // AuraApplied from a stack/refresh rather than a new application
+  uint32 remove_mode = 7;     // AuraRemoved: AuraRemoveMode (1 default, 2 interrupt, 3 cancel, 4 dispel, 5 death, 6 expire)
+}
+
+message SpellCastEvent {
+  uint64 caster_guid = 1;
+  uint32 spell_id = 2;
+  uint32 cast_count = 3;      // echoed client cast count (0 = AzerothCore-triggered)
+  uint64 command_id = 4;      // the CastSpell command it belongs to, when known
+  enum Outcome { OUTCOME_UNSPECIFIED = 0; STARTED = 1; SUCCEEDED = 2; FAILED = 3; INTERRUPTED = 4; CHANNEL_ENDED = 5; }
+  Outcome outcome = 5;
+  string reason = 6;          // SpellCastResult name on failure
+  uint32 cast_time_ms = 7;    // SPELL_START timer / channel duration
+}
+
+message LevelUpEvent {
+  uint32 old_level = 1;
+  uint32 new_level = 2;
+}
+
+message LootEvent {
+  enum Kind { KIND_UNSPECIFIED = 0; WINDOW_OPENED = 1; ERROR = 2; ITEM_RECEIVED = 3; MONEY = 4; }
+  Kind kind = 1;
+  uint64 loot_guid = 2;
+  uint32 error = 3;           // LootError when kind = ERROR
+  uint32 item_id = 4;
+  uint32 count = 5;
+  uint32 money_copper = 6;
+}
+
+enum PromptKind {
+  PROMPT_KIND_UNSPECIFIED = 0;
+  GROUP_INVITE = 1;
+  TRADE_REQUEST = 2;
+  DUEL_REQUEST = 3;
+  RESURRECT = 4;
+  SUMMON = 5;
+  LOOT_ROLL = 6;
+  READY_CHECK = 7;
+}
+
+message PromptEvent {
+  uint64 prompt_id = 1;       // pass to RespondToPrompt
+  PromptKind kind = 2;
+  uint64 from_guid = 3;       // inviter/trader/duel initiator/resurrector/summoner/check initiator (0 if unknown)
+  string from_name = 4;       // group invite and resurrect carry a name
+  uint32 timeout_ms = 5;      // auto-declined after this (ACSDK.Prompt.TimeoutSec, or the server's own)
+  uint64 loot_guid = 6;       // LOOT_ROLL
+  uint32 loot_slot = 7;
+  uint32 item_id = 8;
+  uint32 zone_id = 9;         // SUMMON destination zone
+  bool closed = 10;           // the prompt ended (answered, timed out, or withdrawn); no response possible
+  string close_reason = 11;
+}
+
+message LeaseLostEvent {
+  string reason = 1;          // EXPIRED, TAKEN_OVER
+  string new_holder = 2;      // label of the controller that took over
+}
+
+message CharacterStateChangedEvent {
+  LifecycleState state = 1;   // character.proto
+  bool dead = 2;
+  bool ghost = 3;
+  bool in_combat = 4;
+  bool teleporting = 5;
+  uint32 map_id = 6;
+  string reason = 7;          // e.g. KICKED, LOGIN, LOGOUT, SERVER_SHUTDOWN
+}
+
+message CommandResultEvent {
+  uint64 command_id = 1;
+  uint32 status = 2;          // CommandStatus (action.proto)
+  string reason = 3;
+  uint32 spell_id = 4;
+}
+
+message RawPacketEvent {
+  uint32 opcode = 1;
+  bytes payload = 2;
+}
+
+message LaggedEvent {
+  uint64 dropped = 1;         // events this subscriber lost since the previous Lagged (queue overflow)
+}
+
+message RespondToPromptRequest {
+  uint64 character_guid = 1;
+  string lease_token = 2;
+  uint64 prompt_id = 3;
+  bool accept = 4;
+  uint32 roll_vote = 5;       // LOOT_ROLL: 0 pass, 1 need, 2 greed, 3 disenchant (accept is ignored)
+}
+
+message PromptResponse {
+  bool ok = 1;
+  string reason = 2;          // UNKNOWN_PROMPT, PROMPT_CLOSED, INVALID_LEASE_TOKEN
+}
+

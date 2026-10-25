@@ -30,9 +30,16 @@ Programs talk to it with the Python SDK, [AzerothCore-SDK](https://github.com/Si
    - **Windows:** use vcpkg with [deps/vcpkg.json](deps/vcpkg.json) (triplet `x64-windows-static-md`) and pass
      vcpkg's toolchain file to CMake. [docs/windows-build.md](docs/windows-build.md) has the full, tested recipe,
      and `scripts/build.ps1` automates it.
-   - **Linux:** vcpkg works the same way (triplet `x64-linux`), or use distribution packages that ship CMake
-     config files (for example `libgrpc++-dev`, `protobuf-compiler-grpc` and `libprotobuf-dev` on recent
-     Debian/Ubuntu). The Linux build has not been tested yet; reports are welcome.
+   - **Linux (Debian/Ubuntu):** the distribution packages work. Tested on Ubuntu 24.04 (gRPC 1.51, protobuf
+     3.21, clang 18) against AzerothCore `0540ae80`, and built on every change by
+     [.github/workflows/linux-build.yml](.github/workflows/linux-build.yml):
+
+     ```bash
+     sudo apt install libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler
+     ```
+
+     Other distributions: any gRPC install that ships its CMake config (`gRPCConfig.cmake`) works, as does
+     vcpkg (triplet `x64-linux`).
 
 3. **Re-run CMake and rebuild** AzerothCore as you normally do (`MODULES=static` is the default). The module adds
    itself to `worldserver`. The C++ tests are off by default; add `-DACSDK_BUILD_TESTS=ON` to build
@@ -78,7 +85,12 @@ internet. Controllers can only ever drive characters on prefix-matched accounts,
 ## Versions
 
 The protos in [proto/](proto/) are the API. The SDK repository keeps a copy matched to a module release, and the
-server reports its version through `ServerService.GetInfo` (`sdk_version`, currently `1.0.0`).
+server reports its version through `ServerService.GetInfo` (`sdk_version`, currently `1.1.0`). Releases are
+tagged `v<version>` in both repositories; use the SDK release with the same version as your module.
+
+## License
+
+GPL-2.0, like AzerothCore ([LICENSE](LICENSE)). The Python SDK is a separate, MIT-licensed project.
 
 ## More
 

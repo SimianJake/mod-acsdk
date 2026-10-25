@@ -156,6 +156,8 @@ namespace acsdk
         bool Wait(uint64_t commandId, CommandDone done);
         // The terminal result if the command already finished (and is still remembered).
         std::optional<CommandResult> Finished(uint64_t commandId) const;
+        // The character a running or recently finished command belongs to; empty if unknown.
+        ObjectGuid CharacterOf(uint64_t commandId) const;
 
         void Update();
 
@@ -205,7 +207,7 @@ namespace acsdk
         void HandleInteractionPacket(Player* player, std::shared_ptr<Command> const& cmd, CapturedPacket const& packet, ByteBuffer& buf);
         void PollInteraction(Player* player, std::shared_ptr<Command> const& cmd);
         std::string DiagnoseNoResponse(Player* player, Command const& cmd) const;
-        void Remember(CommandResult const& result);
+        void Remember(ObjectGuid character, CommandResult const& result);
 
         HeadlessRuntime& _runtime;
         bool _knockbackReflex = true;
@@ -216,6 +218,7 @@ namespace acsdk
         std::unordered_map<uint64_t, std::shared_ptr<Command>> _active;
         std::deque<CommandResult> _recent;    // bounded history for late Wait() calls
         std::unordered_map<uint64_t, CommandResult> _recentById;
+        std::unordered_map<uint64_t, ObjectGuid> _recentCharacter;
     };
 
     char const* CommandStatusName(CommandStatus status);

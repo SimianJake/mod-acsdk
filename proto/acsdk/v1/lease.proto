@@ -3,7 +3,9 @@ syntax = "proto3";
 package acsdk.v1;
 
 // Controller ownership of characters (PLAN.md §4.4). Exactly one controller drives a character at a
-// time; anyone authenticated may observe. The lease token is a bearer capability: keep it secret.
+// time. Only the character's own account may claim or observe it, and a lease token is valid only with
+// the session that claimed it; when that session ends, its leases end (LeaseLost SESSION_ENDED).
+// The lease token is a bearer capability: keep it secret.
 service LeaseService {
   // The character must be headless (logging in or online). Fails with already_leased unless `force`
   // is set and ACSDK.Lease.AllowForceTakeover = 1, which invalidates the previous holder's token.

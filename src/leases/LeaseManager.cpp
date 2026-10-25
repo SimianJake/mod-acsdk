@@ -32,7 +32,7 @@ namespace acsdk
         return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
     }
 
-    LeaseManager::Result LeaseManager::Claim(uint64_t guid, std::string const& holderLabel, bool force, Clock::time_point now, Grant& out)
+    LeaseManager::Result LeaseManager::Claim(uint64_t guid, uint64_t sessionId, std::string const& holderLabel, bool force, Clock::time_point now, Grant& out)
     {
         out = Grant{};
         auto it = _leases.find(guid);
@@ -44,25 +44,25 @@ namespace acsdk
             out.previousHolder = it->second.holderLabel; // old token is invalidated below
         }
 
-        Lease lease{ _generate(), holderLabel, now + _ttl };
+        Lease lease{ _generate(), holderLabel, now + _ttl, sessionId };
         out.token = lease.token;
         out.expiresAt = lease.expiresAt;
         _leases[guid] = std::move(lease);
         return Result::Ok;
     }
 
-    LeaseManager::Result LeaseManager::Release(uint64_t guid, std::string const& token, Clock::time_point now)
+    LeaseManager::Result LeaseManager::Release(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now)
     {
-        if (!Validate(guid, token, now))
+        if (!Validate(guid, sessionId, token, now))
             return _leases.contains(guid) ? Result::InvalidToken : Result::NotLeased;
 
         _leases.erase(guid);
         return Result::Ok;
     }
 
-    LeaseManager::Result LeaseManager::Renew(uint64_t guid, std::string const& token, Clock::time_point now, Clock::time_point& expiresAt)
+    LeaseManager::Result LeaseManager::Renew(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now, Clock::time_point& expiresAt)
     {
-        if (!Validate(guid, token, now))
+        if (!Validate(guid, sessionId, token, now))
             return _leases.contains(guid) ? Result::InvalidToken : Result::NotLeased;
 
         Lease& lease = _leases[guid];
@@ -71,10 +71,10 @@ namespace acsdk
         return Result::Ok;
     }
 
-    bool LeaseManager::Validate(uint64_t guid, std::string const& token, Clock::time_point now) const
+    bool LeaseManager::Validate(uint64_t guid, uint64_t sessionId, std::string const& token, Clock::time_point now) const
     {
         auto it = _leases.find(guid);
-        if (it == _leases.end() || it->second.expiresAt <= now)
+        if (it == _leases.end() || it->second.expiresAt <= now || it->second.sessionId != sessionId)
             return false;
         return ConstantTimeEquals(it->second.token, token);
     }
@@ -90,7 +90,7 @@ namespace acsdk
         auto it = _leases.find(guid);
         if (it == _leases.end() || it->second.expiresAt <= now)
             return std::nullopt;
-        return LeaseInfo{ guid, it->second.holderLabel, it->second.expiresAt };
+        return LeaseInfo{ guid, it->second.holderLabel, it->second.expiresAt, it->second.sessionId };
     }
 
     std::vector<LeaseManager::LeaseInfo> LeaseManager::List(Clock::time_point now) const
@@ -98,7 +98,7 @@ namespace acsdk
         std::vector<LeaseInfo> out;
         for (auto const& [guid, lease] : _leases)
             if (lease.expiresAt > now)
-                out.push_back({ guid, lease.holderLabel, lease.expiresAt });
+                out.push_back({ guid, lease.holderLabel, lease.expiresAt, lease.sessionId });
         return out;
     }
 
@@ -121,5 +121,21 @@ namespace acsdk
     void LeaseManager::Forget(uint64_t guid)
     {
         _leases.erase(guid);
+    }
+
+    std::vector<uint64_t> LeaseManager::EndSession(uint64_t sessionId)
+    {
+        std::vector<uint64_t> ended;
+        for (auto it = _leases.begin(); it != _leases.end();)
+        {
+            if (it->second.sessionId == sessionId)
+            {
+                ended.push_back(it->first);
+                it = _leases.erase(it);
+            }
+            else
+                ++it;
+        }
+        return ended;
     }
 }

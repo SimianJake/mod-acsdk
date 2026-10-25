@@ -27,12 +27,18 @@ namespace acsdk
     public:
         struct Filter
         {
-            std::unordered_set<uint64_t> characters;   // empty = all headless characters
+            uint32_t accountId = 0;                     // only characters on this account (0 = no restriction)
+            uint64_t sessionId = 0;                     // the stream ends when this session ends (EventBus::EndSession)
+            std::unordered_set<uint64_t> characters;   // empty = all characters of accountId
             uint32_t typeMask = 0;                      // bit per v1::EventType; 0 = all except RAW_PACKET
             std::unordered_set<uint16_t> rawOpcodes;
         };
 
         EventSubscriber(Filter filter, std::size_t capacity) : _filter(std::move(filter)), _capacity(capacity) { }
+
+        // Account owning a character guid (0 if none); set once at startup. Matches runs on the world thread.
+        using OwnerOf = uint32_t (*)(uint64_t characterGuid);
+        static void SetOwnerOf(OwnerOf fn) { s_ownerOf.store(fn, std::memory_order_relaxed); }
 
         bool Matches(v1::Event const& event, v1::EventType type) const;
         Filter const& GetFilter() const { return _filter; }
@@ -44,15 +50,23 @@ namespace acsdk
         // which case the subscriber is marked idle and the next Push wakes it.
         EventPtr Next();
 
+        // Marks the stream as ending: the writer drains what is queued, then finishes. Returns true when the
+        // writer should be woken.
+        bool Close();
+        bool Closed() const;
+
         uint64_t TotalDropped() const { return _totalDropped.load(std::memory_order_relaxed); }
 
     private:
+        static inline std::atomic<OwnerOf> s_ownerOf{nullptr};
+
         Filter _filter;
         std::size_t _capacity;
-        std::mutex _mutex;
+        mutable std::mutex _mutex;
         std::deque<EventPtr> _queue;
         uint64_t _droppedSinceReport = 0;
         bool _writing = false;
+        bool _closed = false;
         std::atomic<uint64_t> _totalDropped{0};
     };
 
@@ -80,6 +94,10 @@ namespace acsdk
         // gRPC threads.
         std::shared_ptr<EventSubscriber> Subscribe(EventSubscriber::Filter filter, Waker waker);
         void Unsubscribe(EventSubscriber const* subscriber);
+        // World thread: end every stream of `sessionId` (the session ended).
+        void EndSession(uint64_t sessionId);
+        // Sessions with at least one open stream (an open stream keeps its session alive).
+        std::vector<uint64_t> StreamSessions() const;
 
         void SetQueueCapacity(std::size_t capacity) { _capacity = capacity; }
         void SetEventOpcodes(std::vector<uint16_t> opcodes);

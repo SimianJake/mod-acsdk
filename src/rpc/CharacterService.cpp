@@ -3,6 +3,7 @@
 #include "Services.h"
 
 #include "Bag.h"
+#include "CharacterCache.h"
 #include "Corpse.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
@@ -37,97 +38,45 @@ namespace acsdk
             return v1::LIFECYCLE_STATE_UNSPECIFIED;
         }
 
-        // LIKE pattern for "username starts with prefix", escaping LIKE wildcards with '!'.
-        std::string PrefixLikePattern(std::string prefix)
+        // The caller's own characters only (ARCHITECTURE.md §4.3). One async query on the world thread's
+        // QueryCallbackProcessor, so neither the world thread nor a gRPC thread ever blocks on the database.
+        void ListOnWorldThread(WorldCallPtr call, Caller caller, v1::ListCharactersResponse* response)
         {
-            std::string escaped;
-            for (char c : prefix)
-            {
-                if (c == '%' || c == '_' || c == '!')
-                    escaped += '!';
-                escaped += c;
-            }
-            escaped += '%';
-            LoginDatabase.EscapeString(escaped);
-            return escaped;
-        }
+            uint32 const maxResults = sAcsdk.GetConfig().maxListResults;
+            std::string characterSql = Acore::StringFormat(
+                "SELECT guid, name, account, race, class, level, online FROM characters "
+                "WHERE account = {} AND deleteInfos_Account IS NULL ORDER BY name LIMIT {}",
+                caller.accountId, maxResults + 1);
 
-        // List runs two async queries chained on the world thread's QueryCallbackProcessor, so neither
-        // the world thread nor a gRPC thread ever blocks on the database.
-        void ListOnWorldThread(WorldCallPtr call, v1::ListCharactersResponse* response)
-        {
-            Config const& config = sAcsdk.GetConfig();
-            if (config.headlessAccountPrefix.empty())
-            {
-                call->Finish(grpc::Status::OK); // no eligible accounts configured
-                return;
-            }
-
-            std::string accountSql = Acore::StringFormat(
-                "SELECT id, username FROM account WHERE username LIKE '{}' ESCAPE '!' ORDER BY id",
-                PrefixLikePattern(config.headlessAccountPrefix));
-
-            uint32 const maxResults = config.maxListResults;
-
-            sAcsdk.Queries().AddCallback(LoginDatabase.AsyncQuery(accountSql).WithCallback(
-                [call, response, maxResults](QueryResult accounts)
+            sAcsdk.Queries().AddCallback(CharacterDatabase.AsyncQuery(characterSql).WithCallback(
+                [call, response, maxResults, caller](QueryResult characters)
                 {
-                    if (!accounts)
+                    if (characters)
                     {
-                        call->Finish(grpc::Status::OK);
-                        return;
-                    }
-
-                    auto accountNames = std::make_shared<std::unordered_map<uint32, std::string>>();
-                    std::string ids;
-                    do
-                    {
-                        Field* fields = accounts->Fetch();
-                        uint32 id = fields[0].Get<uint32>();
-                        (*accountNames)[id] = fields[1].Get<std::string>();
-                        if (!ids.empty())
-                            ids += ',';
-                        ids += std::to_string(id);
-                    } while (accounts->NextRow());
-
-                    std::string characterSql = Acore::StringFormat(
-                        "SELECT guid, name, account, race, class, level, online FROM characters "
-                        "WHERE account IN ({}) AND deleteInfos_Account IS NULL ORDER BY account, name LIMIT {}",
-                        ids, maxResults + 1);
-
-                    sAcsdk.Queries().AddCallback(CharacterDatabase.AsyncQuery(characterSql).WithCallback(
-                        [call, response, maxResults, accountNames](QueryResult characters)
+                        do
                         {
-                            if (characters)
+                            if (static_cast<uint32>(response->characters_size()) >= maxResults)
                             {
-                                do
-                                {
-                                    if (static_cast<uint32>(response->characters_size()) >= maxResults)
-                                    {
-                                        response->set_truncated(true);
-                                        break;
-                                    }
-
-                                    Field* fields = characters->Fetch();
-                                    v1::CharacterSummary* c = response->add_characters();
-                                    c->set_character_guid(fields[0].Get<uint32>());
-                                    c->set_name(fields[1].Get<std::string>());
-                                    uint32 accountId = fields[2].Get<uint32>();
-                                    c->set_account_id(accountId);
-                                    auto it = accountNames->find(accountId);
-                                    if (it != accountNames->end())
-                                        c->set_account_name(it->second);
-                                    c->set_race(fields[3].Get<uint8>());
-                                    c->set_class_id(fields[4].Get<uint8>());
-                                    c->set_level(fields[5].Get<uint8>());
-                                    c->set_online(fields[6].Get<uint8>() != 0);
-                                    HeadlessCharacter const* h = sAcsdk.Runtime().Find(ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>()));
-                                    c->set_state(h ? ToProto(h->state) : v1::OFFLINE);
-                                } while (characters->NextRow());
+                                response->set_truncated(true);
+                                break;
                             }
 
-                            call->Finish(grpc::Status::OK);
-                        }));
+                            Field* fields = characters->Fetch();
+                            v1::CharacterSummary* c = response->add_characters();
+                            c->set_character_guid(fields[0].Get<uint32>());
+                            c->set_name(fields[1].Get<std::string>());
+                            c->set_account_id(fields[2].Get<uint32>());
+                            c->set_account_name(caller.username);
+                            c->set_race(fields[3].Get<uint8>());
+                            c->set_class_id(fields[4].Get<uint8>());
+                            c->set_level(fields[5].Get<uint8>());
+                            c->set_online(fields[6].Get<uint8>() != 0);
+                            HeadlessCharacter const* h = sAcsdk.Runtime().Find(ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>()));
+                            c->set_state(h ? ToProto(h->state) : v1::OFFLINE);
+                        } while (characters->NextRow());
+                    }
+
+                    call->Finish(grpc::Status::OK);
                 }));
         }
 
@@ -218,7 +167,7 @@ namespace acsdk
             }
         }
 
-        // Whitelisted read-only snapshot of AC objects, built on the world thread (PLAN.md Â§4.6.3, Â§4.7).
+        // Whitelisted read-only snapshot of AC objects, built on the world thread (PLAN.md §4.6.3, §4.7).
         void FillState(ObjectGuid guid, std::vector<int> const& sections, v1::CharacterState* s)
         {
             auto wants = [&](v1::StateSection section)
@@ -343,13 +292,19 @@ namespace acsdk
             grpc::ServerUnaryReactor* GetState(grpc::CallbackServerContext* ctx, v1::GetStateRequest const* request, v1::CharacterState* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 ObjectGuid guid = PlayerGuidFromApi(request->character_guid());
                 std::vector<int> sections(request->sections().begin(), request->sections().end());
-                PostToWorld(reactor, [guid, sections, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, sections, response](WorldCallPtr call)
                 {
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
                     FillState(guid, sections, response);
                     call->Finish(grpc::Status::OK);
                 });
@@ -359,7 +314,8 @@ namespace acsdk
             grpc::ServerUnaryReactor* Login(grpc::CallbackServerContext* ctx, v1::LoginRequest const* request, v1::LoginResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 if (request->name().empty())
@@ -369,8 +325,19 @@ namespace acsdk
                 }
 
                 std::string name = request->name();
-                PostToWorld(reactor, [name, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, name, response](WorldCallPtr call)
                 {
+                    // By name: resolve to the guid first, then the usual ownership check. Unknown names fall through
+                    // to the runtime's CHARACTER_NOT_FOUND.
+                    if (ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(name))
+                    {
+                        if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                        {
+                            call->Finish(owner);
+                            return;
+                        }
+                    }
+
                     sAcsdk.Runtime().Login(name, [call, response](LoginResult const& r)
                     {
                         FillLogin(response, r);
@@ -383,15 +350,22 @@ namespace acsdk
             grpc::ServerUnaryReactor* Logout(grpc::CallbackServerContext* ctx, v1::LogoutRequest const* request, v1::LogoutResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
                 ObjectGuid guid = PlayerGuidFromApi(request->character_guid());
                 std::string token = request->lease_token();
-                PostToWorld(reactor, [guid, token, response](WorldCallPtr call)
+                PostToWorld(reactor, [caller, guid, token, response](WorldCallPtr call)
                 {
-                    // A leased character can only be logged out by its lease holder (PLAN.md Â§7).
-                    if (sAcsdk.Leases().IsLeased(guid.GetCounter(), LeaseManager::Clock::now()) && !sAcsdk.CheckLease(guid, token))
+                    if (grpc::Status owner = CheckOwner(caller, guid); !owner.ok())
+                    {
+                        call->Finish(owner);
+                        return;
+                    }
+
+                    // A leased character can only be logged out by its lease holder (PLAN.md §7).
+                    if (sAcsdk.Leases().IsLeased(guid.GetCounter(), LeaseManager::Clock::now()) && !sAcsdk.CheckLease(guid, caller.sessionId, token))
                     {
                         response->set_reason("INVALID_LEASE_TOKEN");
                         call->Finish(grpc::Status::OK);
@@ -411,10 +385,11 @@ namespace acsdk
             grpc::ServerUnaryReactor* List(grpc::CallbackServerContext* ctx, v1::ListCharactersRequest const* /*request*/, v1::ListCharactersResponse* response) override
             {
                 grpc::ServerUnaryReactor* reactor = ctx->DefaultReactor();
-                if (!Authorize(ctx, reactor))
+                Caller caller;
+                if (!Authorize(ctx, reactor, caller))
                     return reactor;
 
-                PostToWorld(reactor, [response](WorldCallPtr call) { ListOnWorldThread(std::move(call), response); });
+                PostToWorld(reactor, [caller, response](WorldCallPtr call) { ListOnWorldThread(std::move(call), caller, response); });
                 return reactor;
             }
         };

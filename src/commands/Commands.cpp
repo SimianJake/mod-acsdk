@@ -139,7 +139,7 @@ namespace acsdk
         auto fail = [&](std::string reason)
         {
             CommandResult r{ id, CommandStatus::Failed, std::move(reason), 0 };
-            Remember(r);
+            Remember(character, r);
             onDone(r);
             return id;
         };
@@ -307,7 +307,7 @@ namespace acsdk
         }
 
         CommandResult result{ cmd->id, status, std::move(reason), cmd->spec.type == CommandType::CastSpell ? cmd->actualSpellId : 0, cmd->interaction };
-        Remember(result);
+        Remember(cmd->character, result);
         if (_resultObserver)
             _resultObserver(cmd->character, result);
 
@@ -317,15 +317,25 @@ namespace acsdk
             done(result);
     }
 
-    void CommandManager::Remember(CommandResult const& result)
+    void CommandManager::Remember(ObjectGuid character, CommandResult const& result)
     {
         _recent.push_back(result);
         _recentById[result.id] = result;
+        _recentCharacter[result.id] = character;
         while (_recent.size() > RecentResults)
         {
             _recentById.erase(_recent.front().id);
+            _recentCharacter.erase(_recent.front().id);
             _recent.pop_front();
         }
+    }
+
+    ObjectGuid CommandManager::CharacterOf(uint64_t commandId) const
+    {
+        if (auto it = _active.find(commandId); it != _active.end())
+            return it->second->character;
+        auto it = _recentCharacter.find(commandId);
+        return it == _recentCharacter.end() ? ObjectGuid::Empty : it->second;
     }
 
     bool CommandManager::Wait(uint64_t commandId, CommandDone done)

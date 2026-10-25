@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <thread>
 
 namespace grpc
@@ -33,6 +34,9 @@ namespace acsdk
 
         bool IsRunning() const { return _server != nullptr; }
 
+        // True for 127.0.0.0/8, ::1 and localhost: the listener has no TLS yet, so it only binds to loopback.
+        static bool IsLoopback(std::string const& address);
+
     private:
         // grpc::Server::Shutdown blocks until every RPC has finished, and some RPCs finish on the
         // world thread, so shutdown runs on a helper thread while the world thread keeps pumping.
@@ -40,6 +44,7 @@ namespace acsdk
         bool WaitFor(int milliseconds);
         void Release();
 
+        std::unique_ptr<grpc::Service> _authService;
         std::unique_ptr<grpc::Service> _serverService;
         std::unique_ptr<grpc::Service> _characterService;
         std::unique_ptr<grpc::Service> _leaseService;

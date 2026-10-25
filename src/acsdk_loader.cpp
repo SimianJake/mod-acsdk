@@ -5,10 +5,12 @@
 void AddSC_acsdk_world();
 void AddSC_acsdk_packets();
 void AddSC_acsdk_events();
+void AddSC_acsdk_commands();
 
 void Addmod_acsdkScripts()
 {
     AddSC_acsdk_world();
     AddSC_acsdk_packets();
     AddSC_acsdk_events();
+    AddSC_acsdk_commands();
 }

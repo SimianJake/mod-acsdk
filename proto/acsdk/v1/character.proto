@@ -5,13 +5,16 @@ package acsdk.v1;
 import "acsdk/v1/common.proto";
 
 // Characters that may be driven headless (PLAN.md §7). Leases are in lease.proto.
+// Every call needs a session (auth.proto) and acts only on characters of the session's own account;
+// another account's character fails with PERMISSION_DENIED.
 service CharacterService {
+  // The session account's own characters.
   rpc List(ListCharactersRequest) returns (ListCharactersResponse);
   // Resolves when the character is in the world (or failed). No-op if it is already headless-online.
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc Logout(LogoutRequest) returns (LogoutResponse);
-  // Live state read from AzerothCore objects on the world thread (PLAN.md §4.7). No token needed:
-  // any controller may observe. Only the requested sections are filled in.
+  // Live state read from AzerothCore objects on the world thread (PLAN.md §4.7). No lease needed, only
+  // ownership. Only the requested sections are filled in.
   rpc GetState(GetStateRequest) returns (CharacterState);
 }
 

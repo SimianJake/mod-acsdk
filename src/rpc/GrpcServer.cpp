@@ -23,12 +23,15 @@ namespace acsdk
         if (_server)
             return true;
 
-        if (config.authToken.empty())
+        // Session tokens and passwords travel in plain HTTP/2 until TLS exists, so never off this machine.
+        if (!IsLoopback(config.bindAddress))
         {
-            LOG_ERROR("module", "mod-acsdk: ACSDK.AuthToken is empty; refusing to start the gRPC listener.");
+            LOG_ERROR("module", "mod-acsdk: ACSDK.BindAddress '{}' is not a loopback address; refusing to start the gRPC listener "
+                                "(the SDK transport has no TLS yet).", config.bindAddress);
             return false;
         }
 
+        _authService = MakeAuthService();
         _serverService = MakeServerService();
         _characterService = MakeCharacterService();
         _leaseService = MakeLeaseService();
@@ -43,6 +46,7 @@ namespace acsdk
 
         grpc::ServerBuilder builder;
         builder.AddListeningPort(address, grpc::InsecureServerCredentials(), &boundPort);
+        builder.RegisterService(_authService.get());
         builder.RegisterService(_serverService.get());
         builder.RegisterService(_characterService.get());
         builder.RegisterService(_leaseService.get());
@@ -64,6 +68,7 @@ namespace acsdk
         {
             LOG_ERROR("module", "mod-acsdk: failed to start gRPC listener on {}.", address);
             _server.reset();
+            _authService.reset();
             _serverService.reset();
             _characterService.reset();
             _leaseService.reset();
@@ -76,6 +81,30 @@ namespace acsdk
 
         LOG_INFO("module", "mod-acsdk: gRPC listener started on {}.", address);
         return true;
+    }
+
+    bool GrpcServer::IsLoopback(std::string const& address)
+    {
+        if (address == "localhost" || address == "::1" || address == "[::1]")
+            return true;
+
+        // Dotted IPv4 in 127.0.0.0/8: four decimal octets, the first 127.
+        int octets = 0;
+        std::size_t i = 0;
+        while (i < address.size())
+        {
+            std::size_t start = i;
+            unsigned value = 0;
+            while (i < address.size() && address[i] >= '0' && address[i] <= '9' && i - start < 3)
+                value = value * 10 + unsigned(address[i++] - '0');
+            if (i == start || value > 255 || (octets == 0 && value != 127))
+                return false;
+            if (++octets == 4)
+                return i == address.size();
+            if (i >= address.size() || address[i++] != '.')
+                return false;
+        }
+        return false;
     }
 
     void GrpcServer::BeginShutdown()
@@ -106,6 +135,7 @@ namespace acsdk
             _shutdownThread.join();
 
         _server.reset();
+        _authService.reset();
         _serverService.reset();
         _characterService.reset();
         _leaseService.reset();

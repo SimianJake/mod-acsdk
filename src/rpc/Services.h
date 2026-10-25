@@ -13,6 +13,7 @@ namespace grpc
 
 namespace acsdk
 {
+    std::unique_ptr<grpc::Service> MakeAuthService();
     std::unique_ptr<grpc::Service> MakeServerService();
     std::unique_ptr<grpc::Service> MakeCharacterService();
     std::unique_ptr<grpc::Service> MakeLeaseService();

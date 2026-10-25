@@ -976,10 +976,6 @@ anything, and nothing was changed.
 
 - **PLAN.md header is stale.** Line 7 still says "Planning — no code written yet. Repository contains only this
   file", and "Last updated" is rev 8 of 2026-10-21, although §13 logs work through 0.5.0.
-- **Config template is missing keys the code reads.** `mod_acsdk.conf.dist` has no `ACSDK.Lease.TtlSec`,
-  `ACSDK.Lease.AllowForceTakeover`, `ACSDK.Lease.LogoutOnOrphanSec` or `ACSDK.Autostart.Characters`. The defaults in
-  [AcsdkConfig.cpp](../src/AcsdkConfig.cpp) apply, but a user of the release package can't
-  discover them from the template.
 - **"Lock-free" wording vs. code.** [events.md](events.md) says EventBus ingress must be "a lock-free MPSC enqueue";
   the implementation is a short mutex-guarded `vector::push_back`
   ([EventBus.cpp:140](../src/events/EventBus.cpp#L140)). The lock is never held across anything

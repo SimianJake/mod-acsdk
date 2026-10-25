@@ -167,7 +167,7 @@ namespace acsdk
             }
         }
 
-        // Whitelisted read-only snapshot of AC objects, built on the world thread (PLAN.md Â§4.6.3, Â§4.7).
+        // Whitelisted read-only snapshot of AC objects, built on the world thread (PLAN.md §4.6.3, §4.7).
         void FillState(ObjectGuid guid, std::vector<int> const& sections, v1::CharacterState* s)
         {
             auto wants = [&](v1::StateSection section)
@@ -364,7 +364,7 @@ namespace acsdk
                         return;
                     }
 
-                    // A leased character can only be logged out by its lease holder (PLAN.md Â§7).
+                    // A leased character can only be logged out by its lease holder (PLAN.md §7).
                     if (sAcsdk.Leases().IsLeased(guid.GetCounter(), LeaseManager::Clock::now()) && !sAcsdk.CheckLease(guid, caller.sessionId, token))
                     {
                         response->set_reason("INVALID_LEASE_TOKEN");

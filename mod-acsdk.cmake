@@ -11,10 +11,18 @@
 # Needs gRPC and protobuf with their CMake config packages (find_package below). On Windows
 # deps/vcpkg.json lists them for triplet x64-windows-static-md (static libraries with the
 # dynamic CRT, matching worldserver); on Linux use vcpkg or a gRPC install that ships CMake
-# configs (see docs/server-install.md).
+# configs (see README.md).
 #
 
-find_package(protobuf CONFIG REQUIRED)
+# protobuf's own CMake config (vcpkg, source builds). Debian/Ubuntu packages ship none; fall back to
+# CMake's FindProtobuf for the library and protoc, and run protoc directly below.
+find_package(protobuf CONFIG QUIET)
+if(protobuf_FOUND)
+  set(ACSDK_PROTOBUF_CONFIG ON)
+else()
+  find_package(Protobuf REQUIRED)
+  set(ACSDK_PROTOBUF_CONFIG OFF)
+endif()
 find_package(gRPC CONFIG REQUIRED)
 
 if(NOT ACSDK_PROTO_DIR)
@@ -31,7 +39,35 @@ set(ACSDK_PROTO_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/acsdk-gen")
 file(MAKE_DIRECTORY "${ACSDK_PROTO_GEN_DIR}")
 
 # Generated code is built in its own library so AzerothCore's warning flags don't apply to it.
-add_library(acsdk-proto STATIC ${ACSDK_PROTO_FILES})
+if(ACSDK_PROTOBUF_CONFIG)
+  add_library(acsdk-proto STATIC ${ACSDK_PROTO_FILES})
+else()
+  # CMake's own protobuf_generate (FindProtobuf) names the files by their path from this source dir,
+  # which breaks the cross-file imports, so call protoc with paths relative to ACSDK_PROTO_DIR.
+  set(ACSDK_PROTO_SOURCES)
+  set(ACSDK_PROTO_NAMES)
+  foreach(proto ${ACSDK_PROTO_FILES})
+    file(RELATIVE_PATH rel "${ACSDK_PROTO_DIR}" "${proto}")
+    string(REGEX REPLACE "\\.proto$" "" base "${rel}")
+    list(APPEND ACSDK_PROTO_NAMES "${rel}")
+    foreach(ext .pb.h .pb.cc .grpc.pb.h .grpc.pb.cc)
+      list(APPEND ACSDK_PROTO_SOURCES "${ACSDK_PROTO_GEN_DIR}/${base}${ext}")
+    endforeach()
+  endforeach()
+  add_custom_command(
+    OUTPUT ${ACSDK_PROTO_SOURCES}
+    COMMAND protobuf::protoc
+      -I "${ACSDK_PROTO_DIR}"
+      --cpp_out "${ACSDK_PROTO_GEN_DIR}"
+      --grpc_out "${ACSDK_PROTO_GEN_DIR}"
+      "--plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+      ${ACSDK_PROTO_NAMES}
+    DEPENDS ${ACSDK_PROTO_FILES} protobuf::protoc gRPC::grpc_cpp_plugin
+    WORKING_DIRECTORY "${ACSDK_PROTO_DIR}"
+    COMMENT "mod-acsdk: generating gRPC code from ${ACSDK_PROTO_DIR}"
+    VERBATIM)
+  add_library(acsdk-proto STATIC ${ACSDK_PROTO_SOURCES})
+endif()
 
 target_link_libraries(acsdk-proto
   PUBLIC
@@ -42,19 +78,21 @@ target_include_directories(acsdk-proto
   PUBLIC
     "${ACSDK_PROTO_GEN_DIR}")
 
-protobuf_generate(
-  TARGET acsdk-proto
-  LANGUAGE cpp
-  IMPORT_DIRS "${ACSDK_PROTO_DIR}"
-  PROTOC_OUT_DIR "${ACSDK_PROTO_GEN_DIR}")
+if(ACSDK_PROTOBUF_CONFIG)
+  protobuf_generate(
+    TARGET acsdk-proto
+    LANGUAGE cpp
+    IMPORT_DIRS "${ACSDK_PROTO_DIR}"
+    PROTOC_OUT_DIR "${ACSDK_PROTO_GEN_DIR}")
 
-protobuf_generate(
-  TARGET acsdk-proto
-  LANGUAGE grpc
-  GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
-  PLUGIN "protoc-gen-grpc=\$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
-  IMPORT_DIRS "${ACSDK_PROTO_DIR}"
-  PROTOC_OUT_DIR "${ACSDK_PROTO_GEN_DIR}")
+  protobuf_generate(
+    TARGET acsdk-proto
+    LANGUAGE grpc
+    GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
+    PLUGIN "protoc-gen-grpc=\$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+    IMPORT_DIRS "${ACSDK_PROTO_DIR}"
+    PROTOC_OUT_DIR "${ACSDK_PROTO_GEN_DIR}")
+endif()
 
 set_target_properties(acsdk-proto
   PROPERTIES

@@ -1,0 +1,49 @@
+# Builds AzerothCore (master) with this module on Ubuntu, using the distribution's gRPC and protobuf
+# packages, and runs the module's C++ tests. Same steps as "Linux" in README.md.
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake make gcc g++ clang libmysqlclient-dev libssl-dev libbz2-dev \
+            libreadline-dev libncurses-dev libboost-all-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler
+
+      - name: Check out AzerothCore
+        uses: actions/checkout@v4
+        with:
+          repository: azerothcore/azerothcore-wotlk
+          ref: master
+          path: azerothcore-wotlk
+
+      - name: Check out mod-acsdk
+        uses: actions/checkout@v4
+        with:
+          path: azerothcore-wotlk/modules/mod-acsdk
+
+      - name: Configure
+        working-directory: azerothcore-wotlk
+        run: |
+          cmake -S . -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DTOOLS_BUILD=none -DSCRIPTS=static -DMODULES=static -DACSDK_BUILD_TESTS=ON
+
+      - name: Build worldserver and module tests
+        working-directory: azerothcore-wotlk
+        run: cmake --build build --target worldserver acsdk-packet-tests acsdk-session-tests -j "$(nproc)"
+
+      - name: Run module tests
+        working-directory: azerothcore-wotlk/build
+        run: |
+          ./bin/acsdk-packet-tests
+          ./bin/acsdk-session-tests

@@ -1,4 +1,4 @@
-# Build output and local config (live .conf files hold ACSDK.AuthToken)
+# Build output and local config (live .conf files are per-server)
 build/
 out/
 vcpkg_installed/
